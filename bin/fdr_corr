@@ -1,0 +1,219 @@
+#!/bin/bash
+
+err () {
+  echo "ERROR: $1" >&2
+  cleanup 1
+}
+
+command_check () {
+  # checks if last command failed. args are $? and command name
+  # PIPESTATUS is used in case last command is piped to tee
+  if [[ ${PIPESTATUS[0]} != 0 ]]; then
+    err "$1 failed"
+  fi
+}
+
+cleanup () {
+  if [[ -d $tmpdir ]]; then
+    rm -r $tmpdir
+  fi
+  exit $1
+}
+
+if [[ $# == 0 || $1 == -h || $1 == --help ]]; then
+  echo "Usage: fdr_corr [options] <stat-type> <image> <out>"
+  echo
+  echo "Perform FDR correction for statistical image. Outputs FDR corrected"
+  echo "image, and prints FDR threshold."
+  echo
+  echo "Arguments:"
+  echo "  <stat-type>    \"zstat\" or \"logp\"."
+  echo "  <image>        Input statistical image. Accepts .nii.gz, .gii, .mgh."
+  echo "  <out>          Output corrected image. .gii or .nii.gz permitted."
+  echo
+  echo "Options:"
+  echo "  --mask=<mask>    Mask containing voxels to perform correction over."
+  echo "                   By default will select voxels with p < 0.9999."
+  echo "  --surf=<surf>    Surface used to convert between Nifti and Gifti formats"
+  echo "                   [Default: 32k_fs_LR/lh.hcp_very_inflated.surf.gii]."
+  echo "  --q=<q>          FDR threshold [Default: 0.05]."
+  echo
+  exit
+fi
+
+stat=
+image=
+output=
+mask=
+surf=$SUBJECTS_DIR/32k_fs_LR/lh.hcp_very_inflated.surf.gii
+surf_mgh=$SUBJECTS_DIR/32k_fs_LR/lh.hcp_very_inflated
+sub=32k_fs_LR
+hemi=lh
+q=0.05
+tmpdir=
+
+while [[ $1 == -* ]]; do
+  case $1 in
+    --mask=*)
+      mask=${1#*=}
+      shift
+      ;;
+    --surf=*)
+      surf=${1#*=}
+      surf_mgh=${surf%.surf.gii}
+      shift
+      ;;
+    --q=*)
+      q=${1#*=}
+      shift
+      ;;
+    -*)
+      err "Unrecognized flag $1."
+      ;;
+  esac
+done
+
+if [[ $# != 3 ]]; then
+  err "Bad number of arguments."
+fi
+
+stat=$1
+input=$2
+output=$3
+
+if [[ $stat != zstat && $stat != logp ]]; then
+  err "Bad stat-type format."
+fi
+
+if [[ ! -f $input ]]; then
+  err "Input $input doesn't exist."
+fi
+ext=$(echo $input | grep -o '\(\.gii$\|\.mgh$\|\.nii\.gz$\)')
+if [[ -z $ext ]]; then
+  err "Bad input format."
+fi
+
+# test if output can be written
+touch $output >/dev/null 2>&1
+if [[ $? != 0 ]]; then
+  err "Can't create output."
+fi
+out_ext=$(echo $output | grep -o '\(\.gii$\|\.nii\.gz$\)')
+if [[ -z $out_ext ]]; then
+  err "Bad output filename: only .gii or .nii.gz."
+fi
+
+if [[ -n $mask ]]; then
+  if [[ ! -f $mask ]]; then
+    err "Mask file doesn't exist."
+  fi
+  mask_ext=$(echo $mask | grep -o '\(\.gii$\|\.mgh$\|\.nii\.gz$\)')
+  if [[ -z $mask_ext ]]; then
+    err "Bad mask format."
+  fi
+fi
+
+if [[ ! -f $surf ]]; then
+  err "Surface: $surf does not exist."
+fi
+if [[ ! -f $surf_mgh ]]; then
+  err "MGH version of surface: $surf_mgh does not exist."
+fi
+
+q_test=$(echo "($q < 1)*($q > 0)" | bc -l)
+if [[ $q_test != 1 ]]; then
+  err "Bad q value: $q."
+fi
+
+tmpdir=$(mktemp -d /tmp/fdr-XXX)
+
+# converting input image to nifti
+case $ext in
+  .gii)
+    wb_command -metric-convert -to-nifti $input $tmpdir/img.nii.gz
+    command_check "metric-convert to nifti"
+    ;;
+  .mgh)
+    mris_convert -f $input $surf_mgh $tmpdir/img.func.gii
+    command_check "mris_convert to gifti"
+    wb_command -metric-convert -to-nifti $tmpdir/img.func.gii $tmpdir/img.nii.gz
+    command_check "metric-convert to nifti"
+    ;;
+  .nii.gz)
+    cp $input $tmpdir/img.nii.gz
+    ;;
+esac
+
+# convert to p-value
+case $stat in
+  logp)
+    ln_ten=$(echo "l(10)" | bc -l)
+    fslmaths -dt double $tmpdir/img.nii.gz -thr 0 -mul -1 -mul $ln_ten \
+      -exp -div 2 $tmpdir/p.nii.gz -odt double
+    command_check "logp value conversion"
+    ;;
+  zstat)
+    fslmaths -dt double $tmpdir/img.nii.gz -ztop $tmpdir/p.nii.gz -odt double
+    command_check "zstat conversion"
+    ;;
+esac
+# very small p values get truncated to zero.
+# make a mask where this happens, so we can change the values
+fslmaths $tmpdir/p.nii.gz -binv -mul $tmpdir/img.nii.gz -thr 3.1 \
+  -bin $tmpdir/rounderr.nii.gz
+command_check "rounderr mask generation"
+fslmaths -dt double $tmpdir/rounderr.nii.gz -mul 0.000000000001 \
+  -add $tmpdir/p.nii.gz $tmpdir/p.nii.gz -odt double
+command_check "rounderr correction"
+
+# generate mask
+if [[ -n $mask ]]; then
+  case $mask_ext in
+    .gii)
+      wb_command -metric-convert -to-nifti $mask $tmpdir/mask.nii.gz
+      command_check "metric-convert to nifti"
+      ;;
+    .mgh)
+      mris_convert -f $mask $surf_mgh $tmpdir/mask.func.gii
+      command_check "mris_convert to gifti"
+      wb_command -metric-convert -to-nifti $tmpdir/mask.func.gii $tmpdir/mask.nii.gz
+      command_check "metric-convert to nifti"
+      ;;
+    .nii.gz)
+      cp $mask $tmpdir/mask.nii.gz
+      ;;
+  esac
+else
+  # If no mask provided, create a mask of all non-zero values
+  fslmaths $tmpdir/img.nii.gz -abs -bin $tmpdir/mask.nii.gz
+fi
+maskarg="-m $tmpdir/mask.nii.gz"
+
+# run fdr
+thr=$(fdr -i $tmpdir/p.nii.gz $maskarg -q $q -a $tmpdir/p_corr.nii.gz | tail -n 1)
+command_check fdr
+
+# print fdr threshold
+# bc can't handle numbers like 4.05516e-05, so need to expand
+thr=$(printf '%0.15f' $thr)
+# multiply by 1/log(10) after taking log
+one_over_ln_ten=$(echo "1/(l(10))" | bc -l)
+thr=$(echo "-l($thr) * $one_over_ln_ten" | bc -l)
+thr=$(printf '%0.5f' $thr)
+echo "FDR threshold (-logp) for q=$q: $thr"
+
+# save fdr corrected image
+fslmaths -dt double $tmpdir/p_corr.nii.gz -log -mul $one_over_ln_ten \
+  -mul -1 $tmpdir/logp_corr.nii.gz
+command_check "-logp conversion"
+case $out_ext in
+  .gii)
+    wb_command -metric-convert -from-nifti $tmpdir/logp_corr.nii.gz $surf $output
+    command_check "output conversion"
+    ;;
+  .nii.gz)
+    cp $tmpdir/logp_corr.nii.gz $output
+    ;;
+esac
+
+cleanup 0

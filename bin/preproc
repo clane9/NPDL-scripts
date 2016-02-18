@@ -1,0 +1,692 @@
+#!/bin/bash
+
+err () {
+  # general function to pass all errors to
+  if [[ -n $startlogging ]]; then
+    echo "ERROR: (id=$id) $1" | tee -a $log >&2
+  else
+    echo "ERROR: $1" >&2
+  fi
+  cleanup 1
+}
+
+warn () {
+  # general function to pass warnings to
+  echo "WARNING: (id=$id) $1" | tee -a $log >&2
+}
+
+num_check () {
+  # checks if input is a number. neg or pos; int or float
+  re='^-?([0-9]+)?[.]?[0-9]+$'
+  if ! [[ $1 =~ $re ]] ; then
+   err "$1 is not a number"
+  fi
+}
+
+int_check () {
+  # checks if input is an int
+  re='^-?[1-9][0-9]*$'
+  if ! [[ $1 =~ $re ]] ; then
+   err "$1 is not an integer."
+  fi
+}
+
+command_check () {
+  # checks if last command failed. args are $? and command name
+  # PIPESTATUS is used in case last command is piped to tee
+  if [[ ${PIPESTATUS[0]} != 0 ]]; then
+    err "$1 failed"
+  fi
+}
+
+calcmax () {
+  tmpmax=$1
+  while [[ -n $1 ]]; do
+    if [[ `echo "$1 > $tmpmax" | bc -l` == 1 ]]; then
+      tmpmax=$1
+    fi
+    shift
+  done
+  echo $tmpmax
+}
+
+cleanup () {
+  if [[ -d $tmpdir ]]; then
+    rm -r $tmpdir
+  fi
+  if [[ -z $startlogging ]]; then
+    echo "Done at `date +%H:%M:%S`."
+  else
+    echo "(id=$id) Done at `date +%H:%M:%S`." | tee -a $log
+  fi
+  exit $1
+}
+
+if [[ $# == 0 ]]; then
+  echo "Usage:"
+  echo "  preproc [options] <subject> <input-run> <outdir>"
+  echo "  preproc [options] --restart <stage> <preprocdir>"
+  exit
+elif [[ $1 == -h || $1 == --help ]]; then
+  echo "Usage:"
+  echo "  preproc [options] <subject> <input-run> <outdir>"
+  echo "  preproc [options] --restart <stage> <preprocdir>"
+  echo
+  echo "This script preprocesses a single functional run using FSL,"
+  echo "Freesurfer, and the Connectome Workbench."
+  echo
+  echo "Options:"
+  echo "  --hpf <secs>         High pass filter cutoff in seconds. This is the"
+  echo "                       longest cycle that will remain in the data [default: 128]."
+  echo "  --slice <order>      Perform slice timing correction. Order can be: u (up),"
+  echo "                       d (down), or i (interleaved) (e.g. --slice u)." 
+  echo "  --fdrms <thr>        Detect motion outliers using FDRMS metric."
+  echo "                       (See FMRIB Technical Report TR99MJ1.) Set your own"
+  echo "                       threshold in mm. [default: 1.5]"
+  echo "  --fix <mode>         Peform FIX denoising. Specify which steps to perform"
+  echo "                       with required mode argument. Options include: i (ica),"
+  echo "                       f (feature extraction), c (classification)"
+  echo "                       r (removal). Combine these options to perform a"
+  echo "                       sequence (E.g. --fix ifcr)."
+  echo "  --fixW <weights>     Specify the FIX training weights file to use for FIX"
+  echo "                       classification. (Only relevant if running FIX.)"
+  echo "                       [default: $FIX_RDATA]"
+  echo "  --fixT <thr>         Specify the FIX classification threshold. Higher values"
+  echo "                       mean more components classified as noise. Sensible values"
+  echo "                       are 5-20. (Only relevant if running FIX.) [default: 10]"
+  echo "  --dil <mm>           Dilate the surface mapped data. (To fill in small holes"
+  echo "                       with nearby values.)"
+  echo "  --fwhm <mm>          Smoothing kernel in mm. [default: 2]"
+  echo "  --stop <stage>       Stop processing after a specific stage. Stages are:"
+  echo "                       (1) FEAT processing, (2) motion artifact detection"
+  echo "                       (3) anatomical registration (4) WM signal (5) FIX"
+  echo "                       denoising, (6) surface mapping, dilating, smoothing" 
+  echo "  --restart <stage>    Restart processing from a specific stage (2-6)."
+  echo "  --log <logfile>      Specify the logfile."
+  echo
+  exit
+fi
+
+
+# defaults
+hpf=128
+slorder=
+fdrms=1.5
+dofix=
+fixmode=
+if [[ -z $FIX_DIR ]]; then
+  fixW=
+else
+  fixW=$FIX_DIR/training_files/$FIX_RDATA
+fi
+fixT=10
+dil=0
+fwhm=2
+stpstage=6
+ststage=
+
+subj=
+input=
+output=
+tmpdir=
+
+# misc variables
+args=$@
+# pid of current job, used for logging
+# useful for when you have many jobs running in parallel
+id=$$
+now=`date "+%m-%d %H:%M:%S"`
+script=$0
+scriptname=`basename $0`
+
+# logfile set-up
+log=preproc_`date +%m-%d`.log
+
+# don't log errors yet though
+startlogging=
+
+while [[ $1 == -* ]]; do
+  case $1 in
+    --hpf)
+      hpf=$2
+      shift
+      shift
+      ;;
+    --slice)
+      slorder=$2
+      shift
+      shift
+      ;;
+    --fdrms)
+      fdrms=$2
+      shift
+      shift
+      ;;
+    --fix)
+      dofix=TRUE
+      fixmode=$2
+      shift
+      shift
+      ;;
+    --fixW)
+      fixW=$2
+      shift
+      shift
+      ;;
+    --fixT)
+      fixT=$2
+      shift
+      shift
+      ;;
+    --dil)
+      dil=$2
+      shift
+      shift
+      ;;
+    --fwhm)
+      fwhm=$2
+      shift
+      shift
+      ;;
+    --log)
+      log=$2
+      if [[ ! -d `dirname $log` ]]; then
+        err "Directory above log file $log does not exist."
+      fi
+      shift
+      shift
+      ;;
+    --stop)
+      stpstage=$2
+      shift
+      shift
+      ;;
+    --restart)
+      ststage=$2
+      shift
+      shift
+      ;;
+    *)
+      err "Unrecognized flag $1."
+      ;;
+  esac
+done
+
+printf '%s\n%s\n' "Starting preproc job at $now (id=$id)." \
+  "command line: $scriptname $args" | tee -a $log
+
+startlogging=TRUE
+
+trap "cleanup 1" SIGHUP SIGINT SIGTERM
+
+# process positional arguments
+# if 1 positional, assume restarting preproc
+if [[ $# == 3 ]]; then
+  subj=$1
+  input=$2
+  output=$3
+  # in case someone adds .feat
+  output=${output%.feat}
+  ststage=1
+elif [[ $# == 1 ]]; then
+  if [[ -z $ststage ]]; then
+    err "Incorrect arguments."
+  fi
+  intre='^-?[1-9][0-9]*$'
+  if [[ ! $ststage =~ $intre ]] || (( $ststage < 2 || $ststage > 6 )); then
+    err "Restart stage should be between 2-6."
+  fi
+  featdir=${1%/}
+  func=$featdir/filtered_func_data.nii.gz
+  if [[ ! -f $func ]]; then
+    err "Volume data $func doesn't exist. Can't restart."
+  fi
+  nvols=`fslnvols $func`
+  oldcommand=$featdir/command.txt
+  if [[ ! -f $oldcommand ]]; then
+    err "Command file $featdir/command.txt doesn't exist. Can't restart."
+  fi
+  # subject is first positional arg of three
+  oldcommand=( `head -n 1 $oldcommand` )
+  subj=${oldcommand[-3]}
+else
+  err "Incorrect number of arguments $#."
+fi
+
+# checking options
+# superficially checking that surface stuff exists
+subjdir=$SUBJECTS_DIR/$subj
+if [[ ! -d $subjdir ]]; then
+  err "$subjdir does not exist."
+fi
+if [[ ! -f $subjdir/surf/lh.midthickness.surf.gii ]]; then
+  err "No midthickness surface for $subj. Run postrecon."
+fi
+downsampdir=$SUBJECTS_DIR/32k_fs_LR
+if [[ ! -d $downsampdir ]]; then
+  err "Can't find 32k_fs_LR files. $downsampdir does not exist."
+fi
+
+# check numerical options
+int_check $hpf
+num_check $fdrms
+num_check $fwhm
+num_check $dil
+
+# check slice timing option
+if [[ -n $slorder ]]; then
+  case $slorder in 
+    u)
+      slorder=1
+      ;;
+    d)
+      slorder=2
+      ;;
+    i)
+      slorder=5
+      ;;
+    *)
+      err "Bad slice order argument $slorder. Only u, d, or i."
+      ;;
+  esac
+else
+  slorder=0
+fi
+
+# check FIX arguments
+if [[ -n $dofix ]]; then
+  if [[ -z $FIX_DIR ]]; then
+    warn "FIX is not installed. Skipping."
+    dofix=
+  else
+    # check if FIX mode is a substring of ifcr by trying to replace it
+    testmode=ifcr
+    if [[ ${testmode/$fixmode} == $testmode ]]; then
+      err "Bad FIX mode $fixmode. Must be substring of 'ifcr'."
+    fi
+    # decide which stages of FIX should be run
+    [[ $fixmode == *i* ]] && dofixi=TRUE || dofixi=
+    [[ $fixmode == *f* ]] && dofixf=TRUE || dofixf=
+    [[ $fixmode == *c* ]] && dofixc=TRUE || dofixc=
+    [[ $fixmode == *r* ]] && dofixr=TRUE || dofixr=
+    if [[ -z $dofixi && ststage == 1 ]]; then
+      err "Must do ICA if running preproc from start. Add 'i' to FIX mode (e.g. --fix ifcr)."
+    fi
+    if [[ -n $dofixc ]]; then
+      if [[ ! -f $fixW ]]; then
+        err "FIX weights file $fixW doesn't exist."
+      fi
+      int_check $fixT
+      if (( $fixT < 0 || $fixT > 100 )); then
+        err "FIX thresh must be between 0 and 100 (5-20 recommended)."
+      fi
+    fi
+    if (( $ststage > 1 )); then
+      icadir=$featdir/filtered_func_data.ica
+      fixWname=`basename ${fixW%.RData}`
+      classfile=$featdir/fix4melview_${fixWname}_thr${fixT}.txt
+      if [[ -z $dofixi && ! -d $icadir ]]; then
+        err "Can't run FIX without doing ICA. Add 'i' to FIX mode (e.g. --fix ifcr)."
+      fi
+      if [[ -z $dofixf && ! -f $featdir/fix/features.csv ]]; then
+        err "Can't run FIX without extracting features. Add 'f' to FIX mode (e.g. --fix ifcr)."
+      fi
+      if [[ -z $dofixc && ! -f $classfile ]]; then
+        err "Can't run FIX without classifying features. Add 'c' to FIX mode (e.g. --fix ifcr)."
+      fi
+    fi
+  fi
+fi
+
+if [[ -n $stpstage ]]; then
+  int_check $stpstage
+  if (( $stpstage < 1 || $stpstage > 6 )); then
+    err "Stop stage should be between 1-6."
+  fi
+  if (( $stpstage < $ststage )); then
+    err "Stop stage should be >= restart stage."
+  fi
+fi
+
+# make tmpdir
+tmpdir=`mktemp -d /tmp/preproc-XXX`
+
+## STAGE 1
+## FEAT processing
+if (( $ststage <= 1 )); then
+  # input checking
+  if [[ ! -f $input ]]; then
+    err "Input $input does not exist."
+  fi
+  nvols=`fslnvols $input`
+  if (( $nvols <= 1 )); then
+    err "Input $input is not a 4d nifti file."
+  fi
+  if (( $nvols < 50 )); then
+    warn "Input $input has less than 50 timepoints."
+  fi
+  
+  # output checking
+  if [[ ! -d `dirname $output` ]]; then
+    err "Directory above output $output does not exist."
+  fi
+  while [[ -e ${output}.feat ]]; do
+    output=$output+
+  done
+
+  # feat preparation
+  # fsf must contain absolute paths
+  fsf=$tmpdir/design.fsf
+  cp $PRPRC_TEMP $fsf
+  sed -i 's@\(set feat_files(1)\)\(.*\)@\1 "'`readlink -m $input`'"@' $fsf
+  sed -i 's@\(set fmri(outputdir)\)\(.*\)@\1 "'`readlink -m $output`'"@' $fsf
+  tr=`fslinfo $input | grep "^pixdim4" | sed 's@pixdim4\s*@@'`
+  sed -i 's@\(set fmri(tr)\)\(.*\)@\1 '$tr'@' $fsf
+  sed -i 's@\(set fmri(npts)\)\(.*\)@\1 '$nvols'@' $fsf
+  sed -i 's@\(set fmri(st)\)\(.*\)@\1 '$slorder'@' $fsf
+  sed -i 's@\(set fmri(paradigm_hp)\)\(.*\)@\1 '$hpf'@' $fsf
+
+  # running feat
+  echo "(id=$id) Running feat..." | tee -a $log
+  # send only the stderr to tee
+  feat $fsf 2>&1 1>/dev/null | tee -a $log
+  command_check "feat"
+  featdir=${output}.feat
+  func=$featdir/filtered_func_data.nii.gz
+
+  # feat dir clean up
+  mv $featdir/design.fsf $featdir/+design.fsf
+  rm $featdir/design*
+  mv $featdir/+design.fsf $featdir/design.fsf
+  rm -r $featdir/logs
+
+  echo "$scriptname $args" >> $featdir/command.txt
+
+  # correcting global signal and making a figure
+  echo "(id=$id) Grand mean intensity scaling..." | tee -a $log
+  globmean=`fslstats $func -k $featdir/mask.nii.gz -M`
+  scaler=`echo "10000/$globmean" | bc -l`
+  fslmaths $func -mul $scaler $func 2>&1 1>/dev/null | tee -a $log
+  fslmeants -i $func -o $featdir/mc/globsig.txt -m $featdir/mask.nii.gz
+  fsl_tsplot -i $featdir/mc/globsig.txt -o $featdir/mc/globsig.png \
+    -t "Global Signal (mean=10000)" 2>&1 1>/dev/null | tee -a $log
+fi
+# exit if done at this stage
+(( $stpstage == 1 )) && cleanup
+
+## STAGE 2
+## Artifact detection
+if (( $ststage <= 2 )); then
+  mkdir $featdir/art 2>/dev/null
+  echo "(id=$id) Checking for motion spikes (fdrms metric)..." | tee -a $log
+  # important if re-starting
+  rm $featdir/art/fdrms.* 2>/dev/null
+  cp $featdir/mc/prefiltered_func_data_mcf_rel.rms $featdir/art/fdrms.values.txt
+  idx=0
+  fdrms_vals=`cat $featdir/art/fdrms.values.txt`
+  for val in $fdrms_vals; do
+    compar=`echo "$val >= $fdrms" | bc -l`
+    if [[ $compar == 1 ]]; then
+      regressor=
+      fmtstring=
+      for i in `seq 0 $(($nvols - 1))`; do
+        fmtstring="$fmtstring%d\n"
+        if [[ $i == $idx ]]; then
+          regressor="$regressor 1"
+        else
+          regressor="$regressor 0"
+        fi
+      done
+      printf '%d\t%.3f\n' $(($idx + 1)) $val >> $featdir/art/fdrms.drops.txt
+      zpadidx=`printf '%03d' $idx`
+      printf "$fmtstring" $regressor >> $tmpdir/fdrms-$zpadidx.txt
+    fi
+    idx=$(($idx + 1))
+  done
+  TEST=`ls $tmpdir | grep 'fdrms-[0-9]\{3\}\.txt'`
+  if [[ -n $TEST ]]; then
+    paste $tmpdir/fdrms-*txt >> $featdir/art/fdrms.confound.txt
+  fi
+
+  # make fdrms plot
+  for i in `seq 0 $(($nvols - 1))`; do
+    echo $fdrms >> $tmpdir/fdrmsthr_ts.txt
+  done
+  fdrms_ymin=0
+  fdrms_ymax1=`calcmax $fdrms_vals`
+  fdrms_ymax2=`echo "$fdrms * 1.5" | bc -l`
+  fdrms_ymax=`calcmax $fdrms_ymax1 $fdrms_ymax2`
+  fsl_tsplot -i $featdir/art/fdrms.values.txt,$tmpdir/fdrmsthr_ts.txt \
+    -o $featdir/art/fdrms.png \
+    -t "FDRMS values (thresh=$fdrms)" \
+    --ymin=$fdrms_ymin --ymax=$fdrms_ymax 2>&1 1>/dev/null | tee -a $log
+fi
+(( $stpstage == 2 )) && cleanup
+
+## STAGE 3
+## Anatomical registration
+if (( $ststage <= 3 )); then
+  echo "(id=$id) Registering functional data to MPRAGE..." | tee -a $log
+  mkdir $featdir/surfreg
+  # make brain-extracted example_func
+  fslmaths $featdir/example_func.nii.gz -mas $featdir/mask.nii.gz \
+    $featdir/example_func_brain.nii.gz 2>&1 1>/dev/null | tee -a $log
+  command_check "example_func brain mask"
+  # run fslregister manually with larger maxangle (default=90 or 70)
+  fslregister --s $subj --mov $featdir/example_func_brain.nii.gz \
+    --reg $featdir/surfreg/flirt_init.dat --niters 1 --dof 6 \
+    --bins 256 --cost corratio --maxangle 120 --nobetmov \
+    --fsvol brainmask.mgz >/dev/null 2>&1
+  command_check "surface reg flirt init"
+  bbregister --s $subj --mov $featdir/example_func_brain.nii.gz \
+    --reg $featdir/surfreg/register.dat --init-reg $featdir/surfreg/flirt_init.dat \
+    --t2 2>&1 1>/dev/null | tee -a $log
+  command_check "surface registration"
+fi
+(( $stpstage == 3 )) && cleanup
+
+## STAGE 4
+## White matter signal
+if (( $ststage <= 4 )); then
+  echo "(id=$id) Computing average wm & csf signal..." | tee -a $log
+  mkdir $featdir/art 2>/dev/null
+  # resampling aseg to functional space. using nearest interpolation so as not to mix up labels
+  mri_vol2vol --mov $featdir/example_func.nii.gz \
+    --targ $subjdir/mri/aseg.mgz --reg $featdir/surfreg/register.dat \
+    --inv --interp nearest --o $tmpdir/aseg.nii.gz 2>&1 1>/dev/null | tee -a $log
+  command_check "aseg resampling"
+  # extract regions from aseg volume: left and right ventricls, white matter 
+  thrs=( 4 43 2 41 )
+  masknames=( csf.lh csf.rh wm.lh wm.rh )
+  for i in {0..3}; do
+    fslmaths $tmpdir/aseg.nii.gz -thr ${thrs[i]} -uthr ${thrs[i]} -bin \
+      $tmpdir/${masknames[i]}.nii.gz 2>&1 1>/dev/null | tee -a $log
+  done
+  for region in csf wm; do
+    # combine left and right masks, no erosion
+    fslmaths $tmpdir/$region.lh.nii.gz -max $tmpdir/$region.rh.nii.gz \
+      $featdir/art/$region.nii.gz 2>&1 1>/dev/null | tee -a $log
+    # extract mean time series
+    fslmeants -i $func -m $featdir/art/$region.nii.gz \
+      -o $featdir/art/$region.values.txt
+    # convert to PSC (in particular, demean)
+    mean=`fslstats $func -k $featdir/art/$region.nii.gz -M`
+    rm $featdir/art/$region.confound.txt 2>/dev/null
+    while read line; do
+      val=`echo "($line - $mean) / $mean" | bc -l`
+      echo $val >> $featdir/art/$region.confound.txt
+    done < $featdir/art/$region.values.txt
+    # plot average time series
+    fsl_tsplot -i $featdir/art/$region.values.txt \
+      -o $featdir/art/$region.values.png -t "$region average time-series"
+  done
+fi
+(( $stpstage == 4 )) && cleanup
+
+## STAGE 5
+## FIX denoising
+if (( $ststage <= 5 )) && [[ -n $dofix ]] ; then
+  echo "(id=$id) Performing FIX denoising..." | tee -a $log
+  # MELODIC ICA
+  if [[ -n $dofixi ]]; then
+    echo "(id=$id) MELODIC ICA..." | tee -a $log
+    melodic -i $func -o $featdir/filtered_func_data.ica \
+      --report 2>&1 1>/dev/null | tee -a $log
+    command_check "MELODIC ICA"
+  fi
+  # Feature extraction
+  if [[ -n $dofixf ]]; then
+    echo "(id=$id) FIX feature extraction..." | tee -a $log
+    # Prepping anatomical files
+    mkdir $featdir/reg 2>/dev/null
+    mri_convert $subjdir/mri/brainmask.mgz \
+      $featdir/reg/highres.nii.gz 2>&1 1>/dev/null | tee -a $log
+    command_check "high res anatomical conversion"
+    mri_matrix_multiply -iim $featdir/surfreg/register.dat \
+      -om $featdir/reg/highres2example_func.dat 2>&1 1>/dev/null | tee -a $log
+    command_check "anatomical registration inversion"
+    tkregister2 --mov $featdir/reg/highres.nii.gz \
+      --targ $featdir/example_func.nii.gz \
+      --reg $featdir/reg/highres2example_func.dat \
+      --fslregout $featdir/reg/highres2example_func.mat \
+      --noedit 2>&1 1>/dev/null | tee -a $log
+    command_check "anatomical registration conversion to FSL format"
+    cp $featdir/example_func.nii.gz $featdir/reg/example_func.nii.gz
+    # FIX feature extraction
+    fix -f $featdir 2>&1 1>/dev/null | tee -a $log
+    command_check "FIX feature extraction"
+  fi
+  # FIX classification
+  if [[ -n $dofixc ]]; then
+    echo "(id=$id) FIX classification..." | tee -a $log
+    fix -c $featdir $fixW $fixT 2>&1 1>/dev/null | tee -a $log
+    command_check "FIX classification"
+  fi
+  # FIX removal of artifactual components
+  if [[ -n $dofixr ]]; then
+    echo "(id=$id) FIX artifact removal..." | tee -a $log
+    # this variable already exists, but I'm defining it again for clarity
+    fixWname=`basename ${fixW%.RData}`
+    fix -a $featdir/fix4melview_${fixWname}_thr${fixT}.txt 2>&1 1>/dev/null | tee -a $log
+    command_check "FIX noise removal"
+  fi
+fi
+(( $stpstage == 5 )) && cleanup
+
+## STAGE 6
+## Surface mapping, dilating, smoothing
+if (( $ststage <= 6 )); then
+  echo "(id=$id) Mapping data to the surface..." | tee -a $log
+  # map clean data to surface if it exists
+  if [[ -f $featdir/filtered_func_data_clean.nii.gz ]]; then
+    func=$featdir/filtered_func_data_clean.nii.gz
+  fi
+  # editing vox2ras matrix so that surface mapping works
+  mri_vol2vol --mov $func --targ $subjdir/mri/brainmask.mgz \
+    --o $tmpdir/anat_func.nii.gz --no-resample \
+    --reg $featdir/surfreg/register.dat 2>&1 1>/dev/null | tee -a $log
+  command_check "functional vox2ras editing."
+  mri_vol2vol --mov $featdir/mask.nii.gz --targ $subjdir/mri/brainmask.mgz \
+    --o $tmpdir/anat_mask.nii.gz --no-resample \
+    --reg $featdir/surfreg/register.dat 2>&1 1>/dev/null | tee -a $log
+  command_check "mask vox2ras editing"
+
+  # mapping resampled data to the surface
+  for hemi in lh rh; do
+    wb_command -volume-to-surface-mapping \
+      $tmpdir/anat_func.nii.gz \
+      $subjdir/surf/$hemi.midthickness.surf.gii \
+      $tmpdir/$hemi.surfed_data.func.gii \
+      -ribbon-constrained \
+      $subjdir/surf/$hemi.white.surf.gii \
+      $subjdir/surf/$hemi.pial.surf.gii 2>&1 1>/dev/null | tee -a $log
+    command_check "$hemi surface data mapping"
+    wb_command -volume-to-surface-mapping \
+      $tmpdir/anat_mask.nii.gz \
+      $subjdir/surf/$hemi.midthickness.surf.gii \
+      $tmpdir/$hemi.mask.shape.gii \
+      -enclosing 2>&1 1>/dev/null | tee -a $log
+    command_check "$hemi surface mask mapping"
+  done
+
+  # downsampling the surface data to the 32k mesh
+  hemis=( lh rh )
+  regspheres=( $downsampdir/surf/lh.sphere.reg.surf.gii $downsampdir/surf/rh.sphere.reg.surf.gii )
+  echo "(id=$id) Downsampling the surface data to the 32k_fs_LR mesh..." | tee -a $log
+  for i in 0 1; do
+    hemi=${hemis[i]}
+    regsphere=${regspheres[i]}
+    wb_command -metric-resample \
+      $tmpdir/$hemi.surfed_data.func.gii \
+      $subjdir/surf/$hemi.sphere.reg.surf.gii \
+      $regsphere \
+      ADAP_BARY_AREA \
+      $tmpdir/$hemi.32k_fs_LR.surfed_data.func.gii \
+      -area-surfs $subjdir/surf/$hemi.midthickness.surf.gii \
+      $subjdir/surf/$hemi.32k_fs_LR.midthickness.surf.gii 2>&1 1>/dev/null | tee -a $log
+    command_check "$hemi surface data downsampling"
+    wb_command -metric-resample \
+      $tmpdir/$hemi.mask.shape.gii \
+      $subjdir/surf/$hemi.sphere.reg.surf.gii \
+      $regsphere \
+      BARYCENTRIC \
+      $tmpdir/$hemi.32k_fs_LR.mask.shape.gii \
+      -largest 2>&1 1>/dev/null | tee -a $log
+    command_check "$hemi surface mask downsampling"
+    wb_command -metric-mask $tmpdir/$hemi.32k_fs_LR.surfed_data.func.gii \
+      $tmpdir/$hemi.32k_fs_LR.mask.shape.gii \
+      $tmpdir/$hemi.32k_fs_LR.surfed_data.func.gii 2>&1 1>/dev/null | tee -a $log
+    command_check "$hemi post downsample masking"
+  done
+
+  # dilating the functional data
+  TEST=`echo "$dil > 0" | bc -l`
+  if [[ $TEST == 1 ]]; then
+    echo "(id=$id) Dilating the functional data..." | tee -a $log
+    for hemi in lh rh; do
+      wb_command -metric-dilate $tmpdir/$hemi.32k_fs_LR.surfed_data.func.gii \
+        $subjdir/surf/$hemi.32k_fs_LR.midthickness.surf.gii \
+        $dil $tmpdir/$hemi.32k_fs_LR.surfed_data.func.gii 2>&1 1>/dev/null | tee -a $log
+      command_check "$hemi functional dilation"
+      cp $tmpdir/$hemi.32k_fs_LR.mask.shape.gii $tmpdir/$hemi.32k_fs_LR.pre-dil_mask.shape.gii
+      wb_command -metric-dilate $tmpdir/$hemi.32k_fs_LR.mask.shape.gii \
+        $subjdir/surf/$hemi.32k_fs_LR.midthickness.surf.gii \
+        $dil $tmpdir/$hemi.32k_fs_LR.mask.shape.gii -nearest 2>&1 1>/dev/null | tee -a $log
+      command_check "$hemi mask dilation"
+    done
+  fi
+
+  # masking the functional data
+  echo "(id=$id) Masking the medial wall..." | tee -a $log
+  for hemi in lh rh; do
+    # if performing dilation, want to mask and keep both dilated and undilated mask
+    for mask in $tmpdir/$hemi.32k_fs_LR.*mask.shape.gii; do
+      mask_bn=${mask##*/}
+      wb_command -metric-math "(mask*(abs(mw-1)))" \
+        $featdir/$mask_bn -fixnan 0 -var mask $mask \
+        -var mw $downsampdir/label/masks/$hemi.Medial_wall.shape.gii >/dev/null 2>&1 # output is annoying
+      command_check "$hemi mask medial wall masking"
+    done
+    wb_command -metric-mask $tmpdir/$hemi.32k_fs_LR.surfed_data.func.gii \
+      $featdir/$hemi.32k_fs_LR.mask.shape.gii \
+      $featdir/$hemi.32k_fs_LR.surfed_data.func.gii 2>&1 1>/dev/null | tee -a $log
+    command_check "$hemi functional medial wall masking"
+  done
+
+  # smoothing on the surface
+  TEST=`echo "$fwhm > 0" | bc -l`
+  if [[ $TEST == 1 ]]; then
+    echo "(id=$id) Smoothing data on the surface..." | tee -a $log
+    sigma=`echo "$fwhm / 2.35482" | bc -l` # fwhm = 2 * sqrt(2*ln(2)) * sigma
+    for hemi in lh rh; do
+      wb_command -metric-smoothing $subjdir/surf/$hemi.32k_fs_LR.midthickness.surf.gii \
+        $featdir/$hemi.32k_fs_LR.surfed_data.func.gii \
+        $sigma \
+        $featdir/$hemi.32k_fs_LR.surfed_data.func.gii \
+        -roi $featdir/$hemi.32k_fs_LR.mask.shape.gii 2>&1 1>/dev/null | tee -a $log
+      command_check "$hemi data smoothing"
+    done
+  fi
+fi
+
+cleanup

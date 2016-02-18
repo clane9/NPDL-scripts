@@ -1,0 +1,149 @@
+#!/bin/bash
+
+command_check () {
+  # PIPESTATUS is used in case last command is piped to tee
+  if [[ ${PIPESTATUS[0]} != 0 ]]; then
+    echo "ERROR: $1 failed." >&2
+    exit 1
+  fi
+}
+
+num_check () {
+  # checks if input is a number. neg or pos; int or float
+  re='^-?([0-9]+)?[.]?[0-9]+$'
+  if [[ ! $1 =~ $re ]] ; then
+    echo FALSE 
+  fi
+}
+
+if [[ $# == 0 ]]; then
+  echo "Usage: ${0##*/} [options] <overlap> <stat>..."
+  exit
+elif [[ $1 == -h || $1 == --help ]]; then
+  echo "Usage: ${0##*/} [options] <overlap> <stat>..."
+  echo
+  echo "Make probabilistic overlap map. The value at a vertex v is the proportion"
+  echo "of stat images with supra-threshold values at v. Inputs must be gifti surface"
+  echo "overlays (.gii)."
+  echo
+  echo "Example:"
+  echo "  overlap --thr=3.1 --fwhm=lh.midthickness.surf.gii,5.0 overlap.func.gii stat01.func.gii stat02.func.gii stat03.func.gii"
+  echo
+  echo "Arguments:"
+  echo "  <overlap>              Output overlap map."
+  echo "  <stat>                 stat image (repeatable)."
+  echo
+  echo "Options:"
+  echo "  --thr=<thresh>         Threshold for stats. [default: 2.3]"
+  echo "  --fwhm=<surf>,<val>    Smooth by fwhm on given surface."
+  echo
+  exit
+fi
+
+# defaults
+fwhmratio=2.35482
+thr=2.3
+dosmooth=
+surf=
+fwhm=
+
+while [[ $1 == -* ]]; do
+  case $1 in
+    --thr=*)
+      thr=${1#*=}
+      shift
+      ;;
+    --fwhm=*)
+      dosmooth=TRUE
+      fwhm=${1#*=}
+      surf=${fwhm%,*}
+      fwhm=${fwhm#*,}
+      shift
+      ;;
+    *)
+      echo "ERROR: Unknown flag $1." >&2
+      exit 1
+      ;;
+  esac
+done
+
+if (( $# < 3 )); then
+  echo "ERROR: At least 3 arguments are required." >&2
+  exit 1
+fi
+
+overlap=$1
+if [[ $overlap != *.gii ]]; then
+  echo "WARNING: Output will be a gifti functional overlay (.func.gii)." >&2
+fi
+shift
+zstats=
+while [[ -n $1 ]]; do
+  if [[ $1 != *.gii ]]; then
+    echo "ERROR: Input stat images must be gifti files (.gii)." >&2
+    exit 1
+  fi
+  zstats="$zstats $1"
+  shift
+done
+
+if [[ -e $overlap ]]; then
+  echo "WARNING: Overlap output $overlap already exists." >&2
+  while [[ -e $overlap ]]; do
+    overlap=$overlap+
+  done
+fi
+
+if [[ ! -d `dirname $overlap` ]]; then
+  echo "ERROR: Directory above $overlap does not exist." >&2
+  exit 1
+fi
+
+for zstat in $zstats; do
+  if [[ ! -f $zstat ]]; then
+    echo "ERROR: Zstat image $zstat does not exist." >&2
+    exit 1
+  fi
+done
+
+if [[ -n `num_check $thr` ]]; then
+  echo "ERROR: Threshold $thr is not a number." >&2
+  exit 1
+fi
+
+if [[ -n $dosmooth ]]; then
+  if [[ ! -f $surf ]]; then
+    echo "ERROR: Surface $surf does not exist." >&2
+    exit 1
+  fi
+  if [[ -n `num_check $fwhm` ]]; then
+    echo "ERROR: fwhm $fwhm is not a number." >&2
+    exit 1
+  fi
+fi
+
+tmpdir=`mktemp -d /tmp/overlap-XXX`
+overlaptmp=$tmpdir/overlap.func.gii
+expression=
+vararg=
+i=0
+for zstat in $zstats; do
+  i=$(($i+1))
+  expression="$expression + (zstat$i > $thr)"
+  vararg="$vararg -var zstat$i $zstat"
+done
+expression="(${expression:3})/$i"
+vararg=${vararg:1}
+wb_command -metric-math "$expression" $overlaptmp $vararg >/dev/null 2>&1
+command_check "wb_command -metric-math"
+
+if [[ -n $dosmooth ]]; then
+  sigma=`echo "$fwhm / $fwhmratio" | bc -l` 
+  wb_command -metric-smoothing $surf $overlaptmp $sigma $overlaptmp > /dev/null
+  command_check "wb_command -metric-smoothing"
+fi
+
+mv $overlaptmp $overlap
+rm -r $tmpdir
+
+exit
