@@ -1,0 +1,274 @@
+#!/usr/bin/env python
+
+"""
+Usage: groupstats [options] <hemi> <design> <cons> <outdir> <ffx-dir>...
+
+Run group analysis on individual fixed effects results. 
+
+Example: 
+  groupstats --copes 5,6,7 --dil 5 lh design.mat cons.txt grp_avg.rfx sub_01.lh.ffx sub_02.lh.ffx sub_03.lh.ffx
+
+Arguments:
+  <hemi>       lh or rh.
+  <design>     Design matrix text file.
+  <cons>       Contrasts text file. One per row.
+  <outdir>     Output directory.
+  <ffx-dir>    Fixed effects directory (repeatable). Order should match
+               design matrix. All directories should have the same contrasts.
+
+Options:
+  --s <subj>         Freesurfer subject to perform analysis on. [default: 32k_fs_LR] 
+  --copes <copes>    Analyze only listed copes. Otherwise, will analyze
+                     all copes for task. Must be comma separated (Eg 1,2,3,7).
+  --ols              Do ordinary least squares analysis. Otherwise, will
+                     do weighted least squares.
+  --dil <dist>       Dilate data before performing stats. Distance in mm.
+  --log <logfile>    Specify the log file.
+"""
+
+# put this up here to avoid imports if I'm only trying to get help message
+from docopt import docopt
+args = docopt(__doc__)
+
+from datetime import datetime
+from glob import glob
+from os import path, mkdir, environ, getpid
+import re
+from shutil import move
+import subprocess
+from sys import argv, exit, stderr
+
+class GroupError(Exception):
+    """
+    Error class for this script.
+    """
+    def __init__(self, msg):
+        msg = 'ERROR: {}'.format(msg)
+        Exception.__init__(self, msg)
+        return
+
+# global vars
+now = datetime.today()
+pid = getpid()
+scriptname = path.basename(argv[0])
+logfile = None
+
+def main(args):
+    global logfile
+    hemi, design, cons, outdir, ffxdirs, copes = arg_check(args)
+    subj, copes, do_ols, dilmm, logfile = opt_check(args, copes)
+    command_line = scriptname + ' ' + ' '.join(argv[1:])
+    logtee('groupstats run at {} (id={})\ncommand line: {}\n'.format(now.strftime('%m-%y %H:%M:%S'), pid, command_line))
+    logtee('(id={}) Prepping inputs...\n'.format(pid))
+    mkdir(outdir)
+    write_out('{}/log'.format(outdir), 'command line: {}\n\n'.format(command_line))
+    make_design_cons(design, cons, outdir)
+    make_images(ffxdirs, copes, do_ols, outdir)
+    if dilmm is not None:
+        image_dilate(subj, hemi, dilmm, outdir)
+    logtee('(id={}) Running group statistics...\n'.format(pid))
+    glmfit_wrap(copes, outdir, do_ols, subj, hemi)
+    logtee('(id={}) Done!\n'.format(pid))
+    done_s = 'groupstats completed successfully! To run mc correction, enter e.g.:\n'
+    done_s += 'mri_glmfit-sim --glmdir {}/cope{} --sim perm 5000 2 perm_5000_01 --sim-sign abs\n'.format(path.abspath(outdir), copes[0])
+    write_out('{}/log'.format(outdir), done_s) 
+    return
+
+def logtee(s):
+    logfile.write(s)
+    print s
+    return
+    
+def write_out(f, s):
+    f = open(f, 'a')
+    f.write(s)
+    f.close()
+    return
+
+def make_cmnd(cmnd_name):
+    def cmnd(args):
+        return subprocess.call('{} {}'.format(cmnd_name, args), shell=True) # would like to capture stderr somehow
+    return cmnd
+
+fslmerge = make_cmnd('fslmerge')
+mri_glmfit = make_cmnd('mri_glmfit')
+mri_glmfit_sim = make_cmnd('mri_glmfit-sim')
+metric_resample = make_cmnd('wb_command -metric-resample')
+metric_merge = make_cmnd('wb_command -metric-merge')
+metric_dilate = make_cmnd('wb_command -metric-dilate')
+
+def arg_check(args):
+    """
+    Quality check arguments.
+    """
+    hemi = args['<hemi>']
+    if hemi not in {'lh', 'rh'}:
+        raise GroupError('hemi must be lh or rh.')
+    
+    design = args['<design>']
+    cons = args['<cons>']
+    if not path.isfile(design) or not path.isfile(cons):
+        raise GroupError('design or contrasts file does not exist.')
+    try:
+        design = read_table(design)
+        cons = read_table(cons)
+    except:
+        raise GroupError('design or contrasts file has bad format.')
+
+    outdir = args['<outdir>']
+    if not path.isdir(path.abspath(path.dirname(outdir))):
+        raise GroupError('directory above {} does not exist.'.format(outdir))
+    if path.exists(outdir):
+        print >> stderr, 'WARNING: outdir {} already exists.'.format(outdir)
+        while path.exists(outdir):
+            outdir += '+'
+    
+    ffxdirs = args['<ffx-dir>']
+    if len(ffxdirs) != len(design):
+        raise GroupError('design does not match fixedfx directories.')
+    copes = []
+    for ffxdir in ffxdirs:
+        if not path.isdir(ffxdir):
+            raise GroupError('fixedfx directory {} does not exist.'.format(ffxdir))
+        copes.append(ffx_check(ffxdir))
+    copes = list(set(copes))
+    if len(copes) > 1:
+        raise GroupError('not all fixedfx directories have same copes.')
+    copes = copes[0]
+    return hemi, design, cons, outdir, ffxdirs, copes
+
+def opt_check(args, copes):
+    """
+    Check options.
+    """
+    subj = args['--s']
+    if not path.isdir('{}/{}'.format(environ['SUBJECTS_DIR'], subj)):
+        raise GroupError('Freesurfer subject {} not in {}.'.format(subj, environ['SUBJECTS_DIR']))
+    
+    less_copes = args['--copes']
+    if less_copes is not None:
+        less_copes = less_copes.split(',')
+        try:
+            less_copes = sorted(map(int, less_copes))
+        except ValueError:
+            raise GroupError('--copes argument has bad format.')
+        if not set(less_copes) <= set(copes):
+            raise GroupError('some of the cope numbers provided are not in the fixedfx dirs.')
+        copes = less_copes 
+
+    do_ols = args['--ols']
+    
+    dilmm = args['--dil']
+    if dilmm is not None:
+        try:
+            dilmm = float(dilmm)
+        except ValueError:
+            raise GroupError('dilate distance must be a number.')
+
+    logfile = args['--log']
+    if logfile is not None:
+        if not path.isdir(path.dirname(path.abspath(logfile))):
+            raise GroupError('directory above log file {} does not exist.'.format(logfile))
+    else:
+        logfile = 'groupstats_{}.log'.format(now.strftime('%m%d%y'))
+    logfile = open(logfile, 'a')
+
+    return subj, copes, do_ols, dilmm, logfile
+
+def ffx_check(ffxdir):
+    """
+    Check that a fixed effects directory has correct structure, return contrast list.
+    """
+    copedirs = glob('{}/cope[1-9]'.format(ffxdir)) + glob('{}/cope[1-9][0-9]'.format(ffxdir))
+    if len(copedirs) == 0:
+        raise GroupError('fixed effects directory {} has bad structure.'.format(ffxdir))
+    copes = tuple(sorted(map(lambda c: int(path.basename(c).replace('cope', '')), copedirs)))
+    return copes
+
+def read_table(table_f):
+    """
+    general function for reading number tables.
+    """
+    nl_pattern = r'[\n\r]+'
+    row_pattern = r'^-?\.?[0-9].*' 
+    delim_pattern = r'[ \t,]+'
+    table_s = open(table_f).read().strip()
+    rows = re.split(nl_pattern, table_s)
+    rows = [row.strip() for row in rows if re.match(row_pattern, row.strip()) is not None]
+    data = [re.split(delim_pattern, row) for row in rows]
+    if len(set([len(row) for row in data])) != 1:
+        raise
+    return data
+
+def make_design_cons(design, cons, outdir):
+    """
+    create design matrix and contrast text files.
+    """
+    write_out('{}/design.mat'.format(outdir), '\n'.join(['\t'.join(row) for row in design]))
+    for i in range(len(cons)):
+        write_out('{}/con{}.mtx'.format(outdir, i+1), '\t'.join(cons[i]) + '\n')
+    return
+
+def make_images(ffxdirs, copes, do_ols, outdir):
+    """
+    Grab cope, varcope images from fixedfx dirs, resample to fsaverage and concatenate.
+    """
+    for cope in copes:
+        for imgtype in 'cope', 'varcope':
+            merge_arg = ' '.join(['-metric {}/cope{}/{}1.func.gii'.format(fd, cope, imgtype) for fd in ffxdirs])
+            ec = metric_merge('{}/{}{}.func.gii {}'.format(outdir, imgtype, cope, merge_arg))
+            if ec != 0:
+                raise GroupError('metric-merge failed')
+            if do_ols: break # don't do varcope iteration
+    return
+
+def image_dilate(subj, hemi, dilmm, outdir):
+    """
+    Dilate cope and varcope images.
+    """
+    surface = '{}/{}/surf/{}.midthickness.surf.gii'.format(environ['SUBJECTS_DIR'], subj, hemi)
+    for image in glob('{}/*cope*.func.gii'.format(outdir)):
+        ec = metric_dilate('{} {} {} {}'.format(image, surface, dilmm, image))
+        if ec != 0:
+            raise GroupError('metric-dilate failed')
+    return
+
+def glmfit_wrap(copes, outdir, do_ols, subj, hemi):
+    """
+    Encapsulate mri_glmfit procedure.
+    """
+    design = '{}/design.mat'.format(outdir)
+    cons = glob('{}/con*.mtx'.format(outdir))
+    cons_arg = ' '.join(['--C ' + con for con in cons])
+    stats_type = {True: 'ols', False: 'wls'}[do_ols]
+    for cope in copes:
+        cope_f = '{}/cope{}.func.gii'.format(outdir, cope)
+        cope_outdir = '{}/cope{}'.format(outdir, cope)
+        glmfit_args = '--y {} --X {} {} --glmdir {} --surf {} {} --cortex'.format(cope_f, design, cons_arg, cope_outdir, subj, hemi)
+        if not do_ols:
+            varcope_f = '{}/varcope{}.func.gii'.format(outdir, cope)
+            glmfit_args += ' --wls {}'.format(varcope_f)
+        ec = mri_glmfit(glmfit_args)
+        if ec != 0:
+            raise GroupError('mri_glmfit failed.')
+        move(cope_f, '{}/cope{}.func.gii'.format(cope_outdir, cope))
+        if not do_ols:
+            move(varcope_f, '{}/varcope{}.func.gii'.format(cope_outdir, cope))
+    return
+
+def cleanup():
+    if logfile is not None and not logfile.closed:
+        logfile.close()
+    return
+
+if __name__ == '__main__':
+    try:
+        main(args)
+        cleanup()
+        exit(0)
+    except GroupError as e:
+        print >> stderr, e
+        if logfile is not None:
+            logfile.write(str(e))
+        cleanup()
+        exit(1)

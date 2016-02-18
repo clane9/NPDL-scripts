@@ -1,0 +1,119 @@
+#!/bin/bash
+
+err () {
+  echo "ERROR: (id=$id) $1." >&2
+  exit 1
+}
+
+command_check () {
+  if [[ ${PIPESTATUS[0]} != 0 ]]; then
+    echo "ERROR: $1 failed." >&2
+    exit 1
+  fi
+}
+
+# misc variables
+name=${0##*/}
+id=$$
+now=`date "+%m-%d %H:%M:%S"`
+
+if [[ $# == 0 || $1 == -h || $1 == --help ]]; then
+  echo "Usage: $name <subj>"
+  echo
+  echo "Perform FSL brain extraction and volume-based registration with MNI 152."
+  echo "Convert surface outputs of recon-all to gifti format. Outputs are placed"
+  echo "in $SUBJECTS_DIR/\`<subj>\`/"
+  exit
+fi
+
+if [[ $# != 1 ]]; then
+  err "Incorrect number of arguments"
+fi
+
+sub=$1
+subdir=$SUBJECTS_DIR/$sub
+if [[ ! -d $subdir ]]; then
+  err "$subdir does not exist"
+fi
+
+mridir=$subdir/mri
+if [[ ! -d $mridir ]]; then
+  err "$mridir does not exist"
+fi
+
+surfdir=$subdir/surf
+if [[ ! -d $surfdir ]]; then
+  err "$surfdir does not exist"
+fi
+
+# TODO: Remove this hardcoded path reference. Resolve location of 32k_fs_LR at
+# configure-time.
+downsamp_surfdir=$SUBJECTS_DIR/32k_fs_LR/surf
+if [[ ! -d $downsamp_surfdir ]]; then
+  err "$downsamp_surfdir does not exist"
+fi
+
+printf '%s\n%s\n' "Starting $name job at $now (id=$id)." "command line: $name $@"
+
+echo "(id=$id) FSL anatomical processing of T1.mgz..."
+T1=$mridir/T1.mgz
+tmpT1=${T1/.mgz/.nii.gz}
+mri_convert $T1 $tmpT1 >/dev/null
+command_check "T1 conversion to nifti"
+fsl_anat -i $tmpT1 -o $subdir/mri/T1 --clobber \
+  --noreorient \
+  --nocrop \
+  --nobias \
+  --noseg \
+  --nosubcortseg >/dev/null
+command_check "FSL anatomical processing"
+rm $tmpT1
+
+echo "(id=$id) Converting freesurfer surfaces to gifti..."
+for hemi in lh rh; do
+  for surf in pial white inflated; do
+    # what is the --cras_correction for again?
+    # something to do with getting the gifti surfaces to line up with the orig.mgz in freeview.
+    mris_convert --cras_correction $surfdir/$hemi.$surf $surfdir/$hemi.$surf.surf.gii >/dev/null
+    command_check "$surf $hemi conversion"
+  done
+  for surf in sphere sphere.reg; do
+    mris_convert $surfdir/$hemi.$surf $surfdir/$hemi.$surf.surf.gii >/dev/null
+    command_check "$surf $hemi conversion"
+  done
+done
+
+# native surface processing
+echo "(id=$id) Creating midthickness and inflated surfaces..."
+for hemi in lh rh; do
+  # create midthickness surface
+  wb_command -surface-average \
+    $surfdir/$hemi.midthickness.surf.gii \
+    -surf $surfdir/$hemi.white.surf.gii \
+    -surf $surfdir/$hemi.pial.surf.gii
+  command_check "$hemi midthickness surface creation"
+  # create inflated surfaces
+  wb_command -surface-generate-inflated \
+    $surfdir/$hemi.midthickness.surf.gii \
+    $surfdir/$hemi.hcp_inflated.surf.gii \
+    $surfdir/$hemi.hcp_very_inflated.surf.gii \
+    -iterations-scale 2.5
+  command_check "$hemi surface inflation"
+done
+
+# downsampling
+echo "(id=$id) Downsampling to 32k_fs_LR mesh..."
+for hemi in lh rh; do
+  regsphere=$downsamp_surfdir/$hemi.sphere.reg.surf.gii
+  for surf in white pial inflated midthickness hcp_inflated hcp_very_inflated; do
+    wb_command -surface-resample \
+      $surfdir/$hemi.$surf.surf.gii \
+      $surfdir/$hemi.sphere.reg.surf.gii \
+      $regsphere BARYCENTRIC \
+      $surfdir/$hemi.32k_fs_LR.$surf.surf.gii 
+    command_check "$hemi $surface downsampling"
+  done
+done
+
+echo "(id=$id) Done!"
+exit

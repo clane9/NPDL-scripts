@@ -1,0 +1,371 @@
+#!/bin/bash
+
+# need to add ID to output
+
+# convert zstat, cope, varcope to gii. put zstat gii above too
+
+err () {
+  echo "ERROR: (id=$id) $1" | tee -a $log >&2
+  exit 1
+}
+
+warn () {
+  echo "WARNING: (id=$id) $1" | tee -a $log >&2
+}
+
+command_check () {
+  # PIPESTATUS is used in case last command is piped to tee
+  if [[ ${PIPESTATUS[0]} != 0 ]]; then
+    err "$1 failed."
+    cleanup
+  fi
+}
+
+len () {
+  # like python's len function
+  echo $#
+}
+
+range () {
+  # like python's range function
+  if (( $# == 2 )); then
+    start=$1
+    stop=$2
+  else
+    start=0
+    stop=$1
+  fi
+  retrange=
+  while (( $start < $stop )); do
+    retrange="$retrange $start"
+    start=$(($start + 1))
+  done
+  echo $retrange
+}
+
+cleanup () {
+  if [[ -z $noclean ]]; then
+    rm -r $tmpdir
+  fi
+}
+
+trap "cleanup; exit 1" SIGHUP SIGINT SIGTERM
+
+if [[ $# == 0 ]]; then
+  echo "Usage: ${0##*/} [options] <hemi> <out-dir> <stats-dir>..."
+  exit
+elif [[ $1 == -h || $1 == --help ]]; then
+  echo
+  echo "Usage: ${0##*/} [options] <hemi> <out-dir> <stats-dir>..."
+  echo
+  echo "Perform fixed effects statistics across runs using FSL and the"
+  echo "Connectome Workbench. All stats-dir's are assumed to have the same"
+  echo "contrasts, and to have been produced by new firstlevel."
+  echo
+  echo "Example:"
+  echo "  ${0##*/} lh blah.ffx blah_01.glm blah_02.glm blah_03.glm"
+  echo
+  echo "Arguments:"
+  echo "  <hemi>             lh or rh."
+  echo "  <out-dir>          Name of output directory."
+  echo "  <stats-dir>        Stats directory (repeatable). Assumed to have"
+  echo "                     been produced by new firstlevel. In particular,"
+  echo "                     <stats-dir>/mask.nii.gz and <stats-dir>/stats"
+  echo "                     must exist."
+  echo
+  echo "Options:"
+  echo "  --surf <surf>      Surface used to convert between Nifti and Gifti formats"
+  echo "                     [Default: 32k_fs_LR/\`<hemi>\`.hcp_very_inflated.surf.gii]."
+  echo "  --empty-fix        Betas for vertices that have data in only some"
+  echo "                     are calculated based on those runs. Otherwise," 
+  echo "                     no stats are done for these vertices."
+  echo "  --log <logfile>    Specify the log file."
+  echo "  --no-clean         Don't remove intermediate files."
+  echo
+  exit 0
+fi
+
+# misc variables
+args=$@
+id=$$
+now=`date "+%m-%d %H:%M:%S"`
+name=${0##*/}
+
+# default log
+log=fixedfx_`date +%m%d%y`.log
+log=`readlink -f $log`
+
+# other defaults
+surf=
+emptyfix=
+noclean=
+
+while [[ $1 == -* ]]; do
+  case $1 in
+    --surf)
+      surf=`readlink -m $2`
+      shift
+      shift
+      ;;
+    --empty-fix)
+      emptyfix=TRUE
+      shift
+      ;;
+    --log)
+      log=`readlink -m $2`
+      if [[ ! -d ${log%/*} ]]; then
+        echo "ERROR: (id=$id) log directory ${log%/*} does not exist." >&2
+        exit 1
+      fi
+      shift
+      shift
+      ;;
+    --no-clean)
+      noclean=TRUE
+      shift
+      ;;
+    *)
+      echo "ERROR: (id=$id) Unknown flag $1." >&2
+      exit 1
+      ;;
+  esac
+done
+
+if (( $# < 3 )); then
+  echo "ERROR: (id=$id) Too few arguments ($#)." >&2
+  exit 1
+fi
+
+hemi=$1
+outdir=`readlink -m $2`
+shift
+shift
+statsdirs=
+while [[ -n $1 ]]; do
+  statsdirs="$statsdirs `readlink -m $1`"
+  shift
+done
+
+printf '%s\n%s\n' "Starting fixedfx job at $now (id=$id)." \
+  "command line: $name $args" | tee -a $log
+
+echo "(id=$id) Prepping..." | tee -a $log
+
+# input checking
+
+if [[ $hemi != lh && $hemi != rh ]]; then
+  err "Bad hemi argument ($hemi)."
+fi
+
+# check that surface exists (used to check gifti format as well, but too time consuming)
+if [[ -z $surf ]]; then
+  surf=$SUBJECTS_DIR/32k_fs_LR/surf/$hemi.hcp_very_inflated.surf.gii
+fi
+if [[ ! -f $surf ]]; then
+  err "Surface $surf does not exist."
+fi
+ext_check=$(echo $surf | grep -o '\.surf\.gii$')
+if [[ -z $ext_check ]]; then
+  err "Bad surface format."
+fi
+
+# outdir check
+if [[ ! -d ${outdir%/*} ]]; then
+  err "Directory above outdir ${outdir%/*} does not exist."
+fi
+if [[ -d $outdir ]]; then
+  warn "outdir $outdir already exists."
+  while [[ -d $outdir ]]; do
+    outdir=$outdir+
+  done
+fi
+
+# stats dir checks
+for dir in $statsdirs; do
+  if [[ ! -d $dir ]]; then
+    err "Stats dir $dir does not exist."
+  fi
+  for f in mask.shape.gii stats stats/dof; do
+    if [[ ! -e $dir/$f ]]; then
+      err "$dir/$f does not exist."
+    fi
+  done
+done
+
+# cope checking
+firststatdir=`echo $statsdirs | awk '{print $1}'`
+copes=
+for cope in $firststatdir/stats/cope*.func.gii; do
+  copes="$copes `basename ${cope%.func.gii}`"
+done
+for dir in $statsdirs; do
+  testcopes=
+  for cope in $dir/stats/cope*.func.gii; do
+    testcopes="$testcopes `basename ${cope%.func.gii}`"
+  done
+  if [[ ! $testcopes == $copes ]]; then
+    err "$firststatdir and $dir have different copes"
+  fi
+done
+
+# setting emptyfix parameters
+if [[ -n $emptyfix ]]; then
+  maskop=-Tmax
+  conrow="1.000000e+00 0.000000e+00"
+  matrow="1.000000e+00 1.000000e+00"
+  numwaves=2
+  voxevarg="--ven=2 --vef=$outdir/missing_data_ev.nii.gz"
+else
+  maskop=-Tmin
+  conrow="1.000000e+00"
+  matrow="1.000000e+00"
+  numwaves=1
+  voxevarg=
+fi
+
+# make outdir
+mkdir $outdir
+echo "$name $args" >> $outdir/command.txt
+
+# preparing flameo inputs
+# mask and dof prep
+tmpdir=$outdir/tmp
+mkdir $tmpdir
+idx=1
+for dir in $statsdirs; do
+  zpadidx=`printf '%02d' $idx`
+  mask=$tmpdir/mask-$zpadidx.nii.gz
+  wb_command -metric-convert -to-nifti $dir/mask.shape.gii $mask >/dev/null 2>&1
+  command_check "metric convert to nifti"
+  dof=`cat $dir/stats/dof`
+  dofimg=$tmpdir/dof-$zpadidx.nii.gz
+  fslmaths $mask -mul $dof $dofimg 2>&1 1>/dev/null | tee -a $log >&2
+  command_check fslmaths
+  idx=$(($idx+1))
+done
+
+masks4d=$tmpdir/masks4d.nii.gz
+mask=$outdir/mask.nii.gz
+dofs4d=$outdir/dofs4d.nii.gz
+fslmerge -t $masks4d $tmpdir/mask-??.nii.gz 2>&1 1>/dev/null | tee -a $log >&2
+command_check fslmerge
+fslmaths $masks4d $maskop $mask 2>&1 1>/dev/null | tee -a $log >&2
+command_check fslmaths
+fslmerge -t $dofs4d $tmpdir/dof-??.nii.gz 2>&1 1>/dev/null | tee -a $log >&2
+command_check fslmerge
+
+# extra mask files for inspection
+masks4dgii=$outdir/masks4d.shape.gii
+maskgii=$outdir/mask.shape.gii
+coverage=$outdir/coverage.shape.gii
+wb_command -metric-convert -from-nifti $masks4d $surf $masks4dgii 2>&1 1>/dev/null | tee -a $log >&2
+command_check metric-convert
+wb_command -metric-convert -from-nifti $mask $surf $maskgii 2>&1 1>/dev/null | tee -a $log >&2
+command_check metric-convert
+wb_command -metric-reduce $masks4dgii SUM $coverage 2>&1 1>/dev/null | tee -a $log >&2
+command_check metric-reduce
+
+if [[ -n $emptyfix ]]; then
+  missreg=$outdir/missing_data_ev.nii.gz
+  fslmaths $masks4d -add 1 -rem 2 -mul $mask $missreg 2>&1 1>/dev/null | tee -a $log >&2
+  command_check fslmaths
+fi
+
+# making design files
+statsdircount=`len $statsdirs`
+con=$outdir/design.con
+echo "/ContrastName1	session average" >> $con 
+echo "/NumWaves	$numwaves" >> $con
+echo "/NumContrasts	1" >> $con
+echo "/PPheights		1.000000e+00" >> $con
+echo "/RequiredEffect		3.121" >> $con
+echo >> $con
+echo "/Matrix" >> $con
+echo "$conrow" >> $con
+
+mat=$outdir/design.mat
+echo "/NumWaves	$numwaves" >> $mat
+echo "/NumPoints	$statsdircount" >> $mat
+echo "/PPheights		1.000000e+00" >> $mat
+echo >> $mat
+echo "/Matrix" >> $mat
+for i in `range $statsdircount`; do
+  echo "$matrow" >> $mat
+done
+
+grp=$outdir/design.grp
+echo "/NumWaves	1" >> $grp
+echo "/NumPoints	$statsdircount" >> $grp
+echo >> $grp
+echo "/Matrix" >> $grp
+for i in `range $statsdircount`; do
+  echo "1" >> $grp
+done
+  
+# running stats
+for cope in $copes; do
+  echo "(id=$id) Running ffx stats for $cope..." | tee -a $log
+  copenum=${cope#cope}
+  copeimgs=
+  varcopeimgs=
+  idx=1
+  for dir in $statsdirs; do
+    zpadidx=$(printf '%02d' $idx)
+    wb_command -metric-convert -to-nifti $dir/stats/$cope.func.gii \
+      $tmpdir/$cope-$zpadidx.nii.gz >/dev/null 2>&1
+    command_check metric-convert
+    wb_command -metric-convert -to-nifti $dir/stats/var$cope.func.gii \
+      $tmpdir/var$cope-$zpadidx.nii.gz >/dev/null 2>&1
+    command_check metric-convert
+    idx=$(($idx + 1))
+  done
+  copeimg=$tmpdir/$cope.nii.gz
+  varcopeimg=$tmpdir/var$cope.nii.gz
+  fslmerge -t $copeimg  $tmpdir/$cope-??.nii.gz 2>&1 1>/dev/null | tee -a $log >&2
+  command_check fslmerge
+  fslmerge -t $varcopeimg $tmpdir/var$cope-??.nii.gz 2>&1 1>/dev/null | tee -a $log >&2
+  command_check fslmerge
+  # have to edit cope & varcope if --empty-fix selected
+  # missing vertices must be set to 1 in cope (so they can be modeled out)
+  # missing vertices must be filled in with neighboring values (0 variance causes error) 
+  if [[ -n $emptyfix ]]; then
+    fslmaths $copeimg -mul $masks4d -add $missreg $copeimg 2>&1 1>/dev/null | tee -a $log >&2
+    command_check fslmaths
+    varcopegii=${varcopeimg%.nii.gz}.func.gii
+    wb_command -metric-convert -from-nifti $varcopeimg $surf $varcopegii 2>&1 1>/dev/null | tee -a $log >&2 
+    command_check metric-convert
+    wb_command -metric-dilate $varcopegii $surf 10 $varcopegii 2>&1 1>/dev/null | tee -a $log >&2 
+    command_check metric-dilate
+    wb_command -metric-convert -to-nifti $varcopegii $varcopeimg 2>&1 1>/dev/null | tee -a $log >&2 
+    command_check metric-convert
+    fslmaths $varcopeimg -mul $mask $varcopeimg 2>&1 1>/dev/null | tee -a $log >&2 
+    command_check fslmaths
+  fi
+  flameo --cope=$copeimg --varcope=$varcopeimg --dm=$mat --tc=$con --cs=$grp \
+    --runmode=fe --dvc=$dofs4d --mask=$mask \
+    --ld=$outdir/$cope $voxevarg 2>&1 1>/dev/null | tee -a $log >&2
+  command_check "flameo $cope"
+  for f in zstat1 cope1 varcope1; do
+    wb_command -metric-convert -from-nifti $outdir/$cope/$f.nii.gz $surf \
+      $outdir/$cope/$f.func.gii 2>&1 1>/dev/null | tee -a $log >&2
+    command_check metric-convert
+  done
+  mv $outdir/$cope/zstat1.func.gii $outdir/zstat$copenum.func.gii
+  # fdr correction on zstat1
+  fdr_corr --mask=$mask --surf=$surf --q=0.05 "zstat" $outdir/$cope/zstat1.nii.gz \
+    $outdir/sigp${copenum}_fdr.func.gii > $outdir/$cope/fdr05_zthr.txt
+  # cleanup
+  if [[ -z $noclean ]]; then
+    rm $outdir/$cope/zflame*
+    rm $outdir/$cope/mean_random_effects_var1.nii.gz
+    rm $outdir/$cope/mask.nii.gz
+  fi
+done
+
+# link to surface for ease of viewing
+ln -s $surf $outdir/$(basename $surf)
+
+echo "(id=$id) Done at `date +%H:%M:%S`!" | tee -a $log
+cleanup
+
+exit 0

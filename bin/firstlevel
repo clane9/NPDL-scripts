@@ -1,0 +1,371 @@
+#!/bin/bash
+
+err () {
+  echo "ERROR: (id=$id) $1" | tee -a $log >&2
+  cleanup
+  exit 1
+}
+
+warn () {
+  echo "WARNING: (id=$id) $1" | tee -a $log >&2
+}
+
+command_check () {
+  # PIPESTATUS is used in case last command is piped to tee
+  if [[ ${PIPESTATUS[0]} != 0 ]]; then
+    err "$1 failed"
+  fi
+}
+
+num_check () {
+  # checks if input is a number. neg or pos; int or float
+  re='^-?([0-9]+)?[.]?[0-9]+$'
+  if [[ ! $1 =~ $re ]] ; then
+   err "$1 is not a number"
+  fi
+}
+
+len () {
+  # like python's len function
+  length=0
+  while [[ -n $1 ]]; do
+    length=$((length+1))
+    shift
+  done
+  echo $length
+}
+
+cleanup () {
+  if [[ -z $noclean ]]; then
+    rm -r $tmpdir
+  fi
+}
+
+trap "cleanup; exit 1" SIGHUP SIGINT SIGTERM
+
+if [[ $# == 0 ]]; then
+  echo "Usage: ${0##*/} [options] <func> <surf> <design> <EVs> <outdir>"
+  exit
+elif [[ $1 == -h || $1 == --help ]]; then
+  echo
+  echo "Usage: ${0##*/} [options] <func> <surf> <design> <EVs> <outdir>"
+  echo
+  echo "Perform firstlevel GLM analysis on a single functional run using FSL"
+  echo "and the Connectome Workbench."
+  echo
+  echo "Example:"
+  echo "  ${0##*/} lh.32k.data.func.gii lh.32k.midthickness.surf.gii \ "
+  echo "    design.fsf \"BLAH_01-task_01-S.txt BLAH_01-task_01-NW.txt\" stats"
+  echo
+  echo "Arguments:"
+  echo "  <func>      Functional data to analyze (gifti format)."
+  echo "  <surf>      Reference surface for reading geometry (gifti format)"
+  echo "  <design>    FSL fsf file describing the GLM analysis."
+  echo "              (Use Feat or Glm guis to create it. Only the model"
+  echo "              specific settings are necessary.)"
+  echo "  <EVs>       List of EV timing files in one of FSL's custom formats"
+  echo "              (3 column or single column). Basenames are expected to"
+  echo "              follow the convention: (.*-)?\`cond\`(.txt)?. Conditions"
+  echo "              must match those in design. The list must be enclosed"
+  echo "              in double quotes and the items separated by spaces."
+  echo "  <outdir>    Name of output directory."
+  echo
+  echo "Options:"
+  echo "  --cfd <list>    List of text files containing confound regressors."
+  echo "                  Each file should have one line per TR, and one column"
+  echo "                  per regressor (delimited by tabs). The list itself"
+  echo "                  should be delimited by commas (E.g. --cfd cfd1.txt,cfd2.txt)"
+  echo "  --tr <secs>     TR for <func-data> in seconds. [default: 2]"
+  echo "  --hpf <secs>    High pass filter cutoff in seconds. This is the"
+  echo "                  longest temporal period that will remain int the"
+  echo "                  model. It should match the value used during"
+  echo "                  preprocessing. [default: 128]"
+  echo "  --fwhm <num>    Pre-stats smoothing kernel in mm. [default: 9.8]"
+  echo "  --pw (0|1|2)    Prewhitening level. O is none, 1 is fast"
+  echo "                  (no ac smoothing), 2 is full. [default: 2]"
+  echo "  --no-clean      Don't delete intermediate files."
+  echo "  --log <file>    Specify the log file."
+  echo
+  exit 
+fi
+
+## maybe should change it so that default is to read tr, hpf from design
+## fwhm should be less by default, 0 possibly
+
+# misc variables
+args=$@
+id=$$
+now=`date "+%m-%d %H:%M:%S"`
+scriptname=${0##*/}
+
+# default log
+log=firstlevel_`date +%m-%d`.log
+
+# more defaults
+confounds=
+tr=2
+hpf=128
+fwhm=9.8
+pw=2
+noclean=
+
+# parse options
+while [[ $1 == -* ]]; do
+  case $1 in
+    --cfd)
+      confounds=`echo $2 | tr , " "`
+      shift
+      shift
+      ;;
+    --tr)
+      tr=$2
+      shift
+      shift
+      ;;
+    --hpf)
+      hpf=$2
+      shift
+      shift
+      ;;
+    --fwhm)
+      fwhm=$2
+      shift
+      shift
+      ;;
+    --pw)
+      pw=$2
+      shift
+      shift
+      ;;
+    --no-clean)
+      noclean=TRUE
+      shift
+      ;;
+    --log)
+      log=$2
+      if [[ ! -d `dirname $log` ]]; then
+        echo "ERROR: log directory `dirname $log` does not exist." >&2
+        exit 1
+      fi
+      shift
+      shift
+      ;;
+    *)
+      echo "ERROR: Unknown flag $1." >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ $# != 5 ]]; then
+  echo "ERROR: Incorrect number of arguments ($#)." >&2
+  exit 1
+fi
+func=$1
+surface=$2
+design=$3
+evs=$4
+outdir=$5
+
+printf '%s\n%s\n' "Starting firstlevel job at $now (id=$id)." \
+  "command line: $scriptname $args" | tee -a $log
+tmpdir=`mktemp -d /tmp/firstlevel-XXX`
+
+# input checking
+# first pass
+echo "(id=$id) Checking inputs..." | tee -a $log
+
+# checking options
+timingdir=$tmpdir/timing_files
+mkdir $timingdir
+if [[ -n $confounds ]]; then
+  for f in $confounds; do
+    if [[ ! -f $f ]]; then
+      err "confound $f does not exist."
+    fi
+  done
+  paste $confounds > $timingdir/confound.txt
+fi
+num_check $tr
+num_check $hpf
+num_check $fwhm
+if [[ $pw != [012] ]]; then
+  err "Prewhitening level must be 0, 1, or 2."
+fi
+
+# Checking arguments
+if [[ ! -f $func ]]; then
+  err "$func does not exist."
+fi
+if [[ ! -f $surface ]]; then
+  err "$surface does not exist."
+fi
+
+## how much slowdown would all the parallel jobs fighting over the design cause?
+if [[ ! -f $design ]]; then
+  err "$design does not exist."
+fi
+tmp_design=$tmpdir/design.fsf
+cp $design $tmp_design 
+feat_level=`grep "set fmri(analysis)" $tmp_design | sed 's@set fmri(analysis) @@'`
+if [[ -z $feat_level ]]; then
+  err "$design has bad format."
+fi
+if [[ $feat_level != [7326] ]]; then
+  err "$design is not set up for stats."
+fi
+
+design_ev_count=`grep 'set fmri(evs_orig)' $tmp_design | sed 's@set fmri(evs_orig) @@'`
+if [[ $design_ev_count != `len $evs` ]]; then
+  err "Different number of EVs specified in $design than provided."
+fi
+for ev in $evs; do
+  if [[ ! -f $ev ]]; then
+    err "$ev does not exist."
+  fi
+  cp $ev $timingdir/`basename $ev`
+done
+
+if [[ ! -d `dirname $outdir` ]]; then
+  err "Directory above the outdir `dirname $outdir` does not exist."
+fi
+if [[ -e $outdir ]]; then
+  warn "$outdir already exists."
+  # add +'s to end of outdir (minus extension) until it doesn't exist
+  while [[ -e $outdir ]]; do
+    base=`basename $outdir`
+    outdir=`dirname $outdir`/${base%%.*}+.${base#*.}
+  done
+fi
+
+# input checking second pass
+# -file-information can take a while
+# func-data
+wb_command -file-information $func >> $tmpdir/func_info.txt
+if [[ $? != 0 ]]; then
+  err "$func doesn't appear to be a *.gii file."
+fi
+# get the number of timepoints out of func_info.txt
+nvols=`head -n 10 $tmpdir/func_info.txt | grep 'Number of Maps' | sed 's@\(Number of Maps:\s\+\)\([0-9]\+\)@\2@'`
+if (( $nvols == 1 )); then
+  err "$func is not a 4d *.gii file."
+fi
+if (( $nvols <= 50 )); then
+  warn "$func has fewer than 50 timepoints."
+fi
+
+# surface
+wb_command -file-information $surface >> $tmpdir/surface_info.txt 
+if [[ $? != 0 ]]; then 
+  err "$surface doesn't appear to be a *.gii file."
+fi
+
+# more checking, and design editing
+for ev in $evs; do
+  cond=`basename ${ev%.txt}`
+  cond=${cond##*-}
+  evidx=`grep "set fmri(evtitle[0-9]\+) \"$cond\"" $tmp_design | \
+    sed 's@\(set fmri(evtitle\)\([0-9]\+\)\(.*\)@\2@'`
+  if [[ -z $evidx ]]; then
+    err "EV with condition $cond not found in $design."
+  fi
+  fullev=`readlink -m $ev`
+  sed -i 's@\(set fmri(custom'$evidx')\)\(.*\)@\1 \"'$fullev'\"@' $tmp_design
+  # empty check
+  if [[ -z `cat $ev` ]]; then
+    sed -i 's@\(set fmri(shape'$evidx')\)\(.*\)@\1 10@' $tmp_design
+  fi
+done
+
+sed -i 's@\(set fmri(tr)\)\(.*\)@\1 '$tr'@' $tmp_design
+sed -i 's@\(set fmri(paradigm_hp)\)\(.*\)@\1 '$hpf'@' $tmp_design
+sed -i 's@\(set fmri(npts)\)\(.*\)@\1 '$nvols'@' $tmp_design
+
+# checking that confounds are text matrices with as many rows as TRs
+if [[ -n $confounds ]]; then
+  for confound in $confounds; do
+    cfdwc=`wc $confound`
+    lines=`echo $cfdwc | awk '{print $1}'`
+    entries=`echo $cfdwc | awk '{print $2}'`
+    if (( $lines != $nvols || ($entries % $nvols) != 0 )); then
+      err "confound $confound has bad format."
+    fi
+  done
+fi
+
+mkdir $outdir
+mv $tmpdir $outdir/tmp
+tmpdir=$outdir/tmp
+mv $tmpdir/timing_files $outdir
+mv $tmpdir/*info.txt $outdir
+
+# add pasted confound file to design
+confound=$outdir/timing_files/confound.txt
+if [[ -f $confound ]]; then
+  echo >> $tmpdir/design.fsf
+  echo "# Overwriting confound settings" >> $tmpdir/design.fsf
+  echo "set fmri(confoundevs) 1" >> $tmpdir/design.fsf
+  echo "set confoundev_files(1) \"`readlink -m $confound`\"" >> $tmpdir/design.fsf
+fi
+
+echo "$scriptname $args" >> $outdir/commandline
+
+# mask creation
+mask=$outdir/mask.shape.gii
+invmask=$tmpdir/inverse_mask.shape.gii
+wb_command -metric-reduce $func VARIANCE $mask >/dev/null 2>&1
+command_check "mask creation"
+wb_command -metric-math "mask>0" $mask -var mask $mask >/dev/null 2>&1
+command_check "mask creation"
+wb_command -metric-math "mask<=0" $invmask -var mask $mask >/dev/null 2>&1
+command_check "inverse mask creation"
+
+TEST=`echo "$fwhm > 0" | bc -l`
+if [[ $TEST == 1 ]]; then
+  echo "(id=$id) Smoothing data on the surface..." | tee -a $log
+  sigma=`echo "$fwhm / 2.35482" | bc -l` # http://en.wikipedia.org/wiki/Gaussian_function
+  wb_command -metric-smoothing $surface $func $sigma \
+    $tmpdir/smooth${fwhm}-${func##*/} -roi $mask 2>&1 1>/dev/null | tee -a $log
+  command_check "data smoothing"
+  func=$tmpdir/smooth${fwhm}-${func##*/}
+fi
+
+# maybe add in option to fill in small holes with real seeming data too
+# remove that duty from preprocessing script, which is really the wrong place for it
+echo "(id=$id) Dilating the data..." | tee -a $log
+wb_command -metric-dilate $func $surface 50 \
+  $tmpdir/dil-${func##*/} -bad-vertex-roi $invmask \
+  -nearest 2>&1 1>/dev/null | tee -a $log
+command_check "data dilation"
+func=$tmpdir/dil-${func##*/}
+
+# producing design* files
+feat_model $tmpdir/design $confound >> $outdir/stats.log 2>&1
+command_check "feat_model"
+mv $tmpdir/design.mat $tmpdir/design.con $tmpdir/design.fsf $tmpdir/design.png $outdir
+
+echo "(id=$id) Performing stats..." | tee -a $log
+pwargs=( "--noest" "" "--sa --ms=15 --epith=5" )
+pwarg=${pwargs[$pw]}
+statsdir=$outdir/stats
+film_gls --rn=$statsdir --in=$func --in2=$surface \
+  --pd=$outdir/design.mat \
+  --mode=surface $pwarg \
+  --con=$outdir/design.con >> $outdir/stats.log 2>&1 
+command_check "film_gls"
+
+# masking images
+echo "(id=$id) Masking stats images..." | tee -a $log
+for stattype in cope varcope tstat zstat; do
+  for gii in $statsdir/${stattype}*.func.gii; do
+    wb_command -metric-math "stat*mask" $gii \
+      -var stat $gii \
+      -var mask $mask >/dev/null 2>&1
+    command_check "$gii masking"
+  done
+done
+
+echo "(id=$id) Done at `date +%H:%M:%S`!" | tee -a $log
+cleanup
+
+exit
