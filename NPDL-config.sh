@@ -28,7 +28,8 @@ source $FSLDIR/etc/fslconf/fsl.sh
 
 # Freesurfer setup.
 # Note: An updated ``mris_convert`` command is needed for ``postrecon`` to
-# work. Specifically we need the "--cras_correction" option.
+# work. Specifically we need the "--cras_correction" option. 
+# A Centos6 binary is included in ``lib``.
 FREESURFER_HOME=
 source $FREESURFER_HOME/SetUpFreeSurfer.sh
 doublebufferflag=1 # Needed to make tksurfer work, as of 10/16/14

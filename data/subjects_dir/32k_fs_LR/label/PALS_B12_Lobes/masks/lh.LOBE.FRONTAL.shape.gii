@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE GIFTI SYSTEM "http://gifti.projects.nitrc.org/gifti.dtd">
+<GIFTI Version="1.0"  NumberOfDataArrays="1">
+   <MetaData>
+      <MD>
+         <Name><![CDATA[UserName]]></Name>
+         <Value><![CDATA[root]]></Value>
+      </MD>
+      <MD>
+         <Name><![CDATA[Date]]></Name>
+         <Value><![CDATA[Thu Feb 12 08:08:38 2015]]></Value>
+      </MD>
+      <MD>
+         <Name><![CDATA[gifticlib-version]]></Name>
+         <Value><![CDATA[gifti library version 1.09, 28 June, 2010]]></Value>
+      </MD>
+   </MetaData>
+   <LabelTable/>
+   <DataArray Intent="NIFTI_INTENT_NONE"
+              DataType="NIFTI_TYPE_FLOAT32"
+              ArrayIndexingOrder="RowMajorOrder"
+              Dimensionality="1"
+              Dim0="32492"
+              Encoding="GZipBase64Binary"
+              Endian="LittleEndian"
+              ExternalFileName=""
+              ExternalFileOffset="">
+      <MetaData/>
+      <Data>eJzt3VGK20AQBNC9Wa6Wo4ewGExwvPJoRtU9eg/qY2GtqZaDVh6B8/X18PvXd55/5jrONwAAAADwzhV7iPYpAb49npvtmrt4N+/u5/a5z05zPdtxpr/Mk2783t3mqKxz/527V7Rb52p26FpN9Y7d+lVRsVf1ThVU6VKpx53XBwBYYWT/9MoA8Frn62T3637nv2Ejf4fTs3S8l+h0D9Tpvq3DvWaH++KVHX+6dhyZ44p+/57TI+f4yl5H3/tqnSr1qdIl3SO5voiIiMhIVji6Rnr2HbLyfUtnx5lmzJXuP3umdPdZ86Q77z5L9/47zNC5f8fOR3qn+x3tnO50tO/j53Snn7qmexzpme4gIiIiIiKya3bnfAAAAAAAKSv3HFcde8VxZx9z5vFmHWvGcc7uU595/ehrR/bXP92X/2R/P/3MxfMcAAAAAAAA6Cn9PHD1c8R0T89CAYARHe8ZXt3rVJ6j0z1bl64d7oV36ZfoWq1X+rNY8vPhq2vsyqyevVsPERERkVQAAAAAAAAAAAAAAAAAAAAAAACA/0t/X5jvGAMAYFSX+8PqPavfa1fuV7VbxV7VOlXqU6VLtR53XD+99u5rXrXeVe/jFeusXmPV8Vddz1Ycd+YxZ+6hzjrW6HEevzu6Nzy6t/xu3Vev/XQ/O72vLv1z9t9/5dxtrnSvmTOl+5jn9SzpLnefQ38REREREREREdk91Tw6ze47cqz0e7PyfUv3XzVjuvOK2dJd7zjP0ZnSHWfNk+42Y450r7NzpPuISP10uFZU71i5X9VuFXtV61SpT5UuFXqkOyTXT88uIlI5Z6+RZ14/8vn/0/0PAAAAAAAAAAAAAAAAAAAAAADq830xAADAat2/t/LV93l20anrs669AQCgG/feQBfp/2Pm7tn5vdtxrt1m2mmeHWY5I93dDPned+yu8/reXXp26tqhZ+VuyXNYtVvFXhU7/dRLl2yPqh3uuHZi3d3WS8y2wxoiIiIiIiIiIiIiIiIiIkcDAAAAAADs7g8fnR/1</Data>
+   </DataArray>
+</GIFTI>

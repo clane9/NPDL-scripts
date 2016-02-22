@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE GIFTI SYSTEM "http://gifti.projects.nitrc.org/gifti.dtd">
+<GIFTI Version="1.0"  NumberOfDataArrays="1">
+   <MetaData>
+      <MD>
+         <Name><![CDATA[UserName]]></Name>
+         <Value><![CDATA[root]]></Value>
+      </MD>
+      <MD>
+         <Name><![CDATA[Date]]></Name>
+         <Value><![CDATA[Thu Feb 12 08:08:40 2015]]></Value>
+      </MD>
+      <MD>
+         <Name><![CDATA[gifticlib-version]]></Name>
+         <Value><![CDATA[gifti library version 1.09, 28 June, 2010]]></Value>
+      </MD>
+   </MetaData>
+   <LabelTable/>
+   <DataArray Intent="NIFTI_INTENT_NONE"
+              DataType="NIFTI_TYPE_FLOAT32"
+              ArrayIndexingOrder="RowMajorOrder"
+              Dimensionality="1"
+              Dim0="32492"
+              Encoding="GZipBase64Binary"
+              Endian="LittleEndian"
+              ExternalFileName=""
+              ExternalFileOffset="">
+      <MetaData/>
+      <Data>eJzt3dFqGzEQBdD8WX+tn178EEiNHUtaSTOjPQcupdSW7qybdSNS/PX18PfP13+ef0+fx/XrDQAAAFyV8fvLbJ0y9clyJpDhfCL6nCTyrCZq74gzqt177twveq+Vou8PAAAAAAAAANzPyP/LqZaTRV/bldc+uvuKuaJ7z54puvNd5jllliuiu8+YIcM8K1Tu/nOGVbPsUrHzrN67Veo62jlShY7f3t07ssnaCwAA7mrH+UPm76Wqq3oG0+LEmR7MdOY8WZ0yS/X+D9VnqNy/YueHUzpn9twzc98K1/OhQkcAAICqrp4tZ4/rISIiIiIiIiIiIlFZeea4au0V685ec+Z6s9aasc7Vc+orzx997sj5eu+5fM/5/slmfg2NvE6nzZf9elRz8utx4ky75jptppPmOWGWCGY4o3+UO/au1rlS3ypdK/TU8Vo/3fp6Zet05z5ZuugQu3/U3nfYc+d+J+2zeo+Ka1dYM+NaUf9OAwAAAAAAANih9WfIdqXq7CeIfu13/izGCXNFz3HyTGbJN8vdZ4juXr2/3jrP7Fulq55zOuo31i1jr2yd7twne4/oDnfZP8PMO/fcPePO/UREetNyH259j2p9P//0uN98+vMTZfj7cdJMq2aLnufkuU6a5bR5TpnFDLX7V+we3Xmkd3Tf3s7RXVv7Rnds6RrdraVndK9PHaM7vesX3eVdt+ger3pFdxARERER2REAAADgPjKcBWQ4m9jZ4Xv91jOaWX16z4Z6r8eruXr3/bTnjnOx6LM5ERGZl4p65oi+viuvf3T3VbNF914xW3Tfnrla5ovuOXOu6G5X5zphDhGRK6lyH8zeM/t7SuZ+Wbtl7JWtU6Y+Wbpk63HH/aP3Pn3PXfvteh137LN6j1Xrr7qfrVh35prPMqw1us73Y18Z2bf1+b/t++q5rXofD1DFSfe2U+7VJ8wx8l6bjf4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAiJbPeF6x56vPk1z1+YZXP3975POlZ3+G+Kp9RORzRr/mRr5ee7/Oe+4NrY9tuee8e8zPX397DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQC3/AE7umEw=</Data>
+   </DataArray>
+</GIFTI>

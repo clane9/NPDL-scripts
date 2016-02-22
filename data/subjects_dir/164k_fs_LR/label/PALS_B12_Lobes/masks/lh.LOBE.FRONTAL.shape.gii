@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE GIFTI SYSTEM "http://gifti.projects.nitrc.org/gifti.dtd">
+<GIFTI Version="1.0"  NumberOfDataArrays="1">
+   <MetaData>
+      <MD>
+         <Name><![CDATA[UserName]]></Name>
+         <Value><![CDATA[root]]></Value>
+      </MD>
+      <MD>
+         <Name><![CDATA[Date]]></Name>
+         <Value><![CDATA[Thu Feb 12 08:11:54 2015]]></Value>
+      </MD>
+      <MD>
+         <Name><![CDATA[gifticlib-version]]></Name>
+         <Value><![CDATA[gifti library version 1.09, 28 June, 2010]]></Value>
+      </MD>
+   </MetaData>
+   <LabelTable/>
+   <DataArray Intent="NIFTI_INTENT_NONE"
+              DataType="NIFTI_TYPE_FLOAT32"
+              ArrayIndexingOrder="RowMajorOrder"
+              Dimensionality="1"
+              Dim0="163842"
+              Encoding="GZipBase64Binary"
+              Endian="LittleEndian"
+              ExternalFileName=""
+              ExternalFileOffset="">
+      <MetaData/>
+      <Data>eJzt3QFu20YQhtHezFfL0YsiEMIqkk1JJP+Z2feAD22BNtydke00Vdx//rn59fW77V8DAAAAAAAAAAAAAAAAAAAAAAAAAAC1+T6ir7l9H9b778Vqjs99Ny+z+9n2NWdW3zOnn5kNAAAAAAAAAAAAwPXu3xOsOcEz6ddmlVaSnnWVVpKedYVWkZ5zhVaSnrU9X+fduaT3ZMeveTSDPfNI78p+f3a/009+jOrxuu/mmN6nvZ7HTmexz3nscg57nMUOe7O/3uyuN3vry876sq8+7KoXe6rPjuqzn7rspi57qclO6rGPOuyiBnuowQ7yzD/H7HPM/Xpmfi3zvpZZX8ecz2fG1zDf85jtOcz1HGZ6PPM8htfmcczxc2b4GfP7jNm9z9xeZ2YAAAAAAAAAAAAAAMAr349L+wIAAAAAAAAAAADWc3sPofcT1rPnvZ92dj3v0a3nk/dP29Gxku9xt8u/JX4fgs9/f0v83hBfjx5L72F1V38sHPG1ZZL03FfeRXrOK84/PdvVZp6e62pzT89zlXmn57jCzNNz+3TeHWafntXU13Z6LlfMOTX/9CzOnHHytZ2+/9Wv5bPnnL5ner7mWXOW6TuZY8/Mr8780nfpOrv0PTrOLX2HbjNLn7/TvNJn7zKr9Lkrzyl91uozSp+z6nzS56s0m/R5qvRoLqvPx2vl8TzS55AkSZIkSZIkSZIkSZImNcWn90/vQbqyzo6cQXoP9v6zVXe1+s41f9/pWXWvk/SsOtdFek6dq+x2vvSMOleZ/c7cbXou3asqPZfOVZWeS9equZ0pPZeOVZOeR9cqSc+ia5WkZ9GxKtJz6Fja9gzpWXQq7XaG9Bw6ldyTXdXf1/a56bt368od3e9Ltfa0fVb6vh2zm9qdtRc7qbeb7Y+bvlvnztqLcju5/Rjpe0zpiH0ov4v02Sf1zuztIb8Dmf+E9s7b3DNz13UzT59vWmadn3X6XNMyYzPuntleM9v0WSRJkiRJkiRJkiRJkiRJkiRJkiRJkpSJdXl9AQAAAAAAAAAAAAAAAAAAAAAAAACd+F6H+21nZW7f8/009zGjn5nP98znOR9fj5nL38zk/8zjD3P4zQzMgPWs+ppf6d6r3XWF+65wz9v9pt5z8g6n/r93VrhT97tNus+Uu0y4h/PndD17x3N3+1jtftaK53XGz1XeddWzdTlT8lyVzvPsLFefp8I50mf46flnnuO7Zyefe8az9z5z++w953h23j3P23Pn+/M8O+enz9s7G0nS7wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgLX8+tLk7F4AAEAdt5+j+7n6LP6dbB7/zj2Tnc6x/Xq6Z6d2W9M7v85pl/Wc8WvZPkdfq8J/u9jzse9zwWOvfE2s2PYOK9j7+a5Lk/x0n+8+L3Vre9/ue3x2p+l1sD3n/ZnT87Orvz36+Ln/65V6dPek1ffx6u4Su9nux67q7McuXt/Pd39+9C7s57i9HbUT2cvK2Umt7KNO5i9JkiRJkiRJkiRJkiRJkiRJkiRJkiRJkiRJkiQJAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOA/v77WaeJMAAAAAAAAAABW530UvdhXH3bVgz3V5f1+tdlPTd4rW5u91OJjpRb7qMHXkRrsIc8O8sw/x+wzzP16Zn4t876OWV/HnM9nxucy3/OY7TnM9RxmeizzPIaP9+OY42e8Fj9jfp8xu/eY2+vM7HXmtZ9Z/czH4D5m9D3zAQAAAIDZJvwa4IRfD+9+h67n7/jeg47v5+925g7nffT7UzudtZLKs3x2tivOt33Go+emznb/nArnenSevR19jnfOcPR5PpnHkWd59lo56xyf3PXTMxwx73eff+a975999j0fPfeKZ22fOfV5V99NkqSVS/28TfX2nj6Trt+5vc/NrtfJrtfIjudnx7Oz37nZ7czsdF52Oiu7nJNdSpIkSZIkSZIkSZIkSZIkSZIkSZIkSZIkSZKko1vxexuteGdJkiRJkiRJkiRJ6hyc4ejXZPrjRNdk7+tm52tl3+tk15IkSZIkSZIkSZIkScfmvRj18r7Henk/ar3spNb87cMuVs8e8tmB+a+c2Zv7Kpl5jVmbt1l3zJzNuHvma7bdMtdr52mm5ll1jmZpjlXmZ4bmZ3Y1MjczM686mZU5JeaUPmfVuZiP2XjNmIl5mIU5mIH7n3vvKXdf8d6r3Xml+65y1xXuOfmO70qfe/XdTbvXu9Lnnn6fT6TPfsQdqtyj8x2OMPXsZ97vjHO/crcrZ/zsPK/eL3nevX/vnrOf4ZMf/4rzPXreO//c9o8AAAAAU1z9614AAMC5/Dx+PjuezX7nstuZ7HQeO53FPuewyxnsEQAAAAAAAIAu/DduAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADjWr6/X2/6z9PPOzm+7tvOe3t2zfffz7o7vP79T3ytfr+nL1+b5fAzPZrdz2etM9jqPXc5in3PY4wx22J8d9mZ/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAADA2d79/2BL+lMn6VlNqJv0vKbURXpO3eskPauudZOeV6e6Ss+tW92k59WtTtKz6lYX6Tl1qZP0rDrUSXpWnaouPZ9OVZaeTYeqS8+nQ5WlZ9OhqtJz6VI16Xl0qZL0LDpUSXoWlasmPY+qVZOeR+WqSM+hemnp+1fPbuqVlr5/xdLS969WWvr+1bKLWtlDPjtYa/bmn51/+s5VMvf5c0/ftULmPXPu6ftVypx7zzl9ryqZb6+5mu15803fado8zdQ8K880fZd05miG6czP7LrOLn0HM6ufeZlVtVmlz95hTulzm08+szGXs+eSPrN51J1J+qzmUGcO6XO6f+7+6TOm7p4+nzuff+f02a68d/o8V901fZaz7re9Z/o8Z+8xfY6z9zitqfeSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEmSJEnSdQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD88S+zLHFr</Data>
+   </DataArray>
+</GIFTI>
