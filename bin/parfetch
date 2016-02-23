@@ -1,7 +1,8 @@
 #!/bin/bash
 
 read_sl () {
-  # scan log=$1; key=$2
+  # Usage: read_sl <scan-log> <field-key>
+  # Read scan log and return value for given key. 
   local line=`cat $1 | grep "^#\s*$2\s*:"`
   if [[ -z $line ]]; then
     echo "ERROR: Scan log $1 does not contain field $2." >&2
@@ -21,10 +22,10 @@ elif [[ $1 == -h || $1 == --help ]]; then
   echo "to gzipped nifti. File organization on the server is assumed to"
   echo "follow the convention:"
   echo
-  echo "  /\`Lab directory\`/\`Study\`/\`Subject ID\`/*_\`Run #\`_\`Acq #\`.*"
+  echo "  {lab dir}/{study dir}/{subject ID}/*_{run #}_{acq #}.*"
   echo
   echo "Arguments:"
-  echo "  <scanlog>    Scan log text file. Describes how files should be"
+  echo "  <scan-log>   Scan log text file. Describes how files should be"
   echo "               renamed. First column is run number, second column"
   echo "               is new name. You may optionally specify the Study,"
   echo "               Subject ID, and/or Scanner ID in a comment line"
@@ -39,8 +40,8 @@ elif [[ $1 == -h || $1 == --help ]]; then
   echo "                      log by default (needs a '# Scanner ID: XXXX' line)."
   echo "  --out <outdir>      Directory to put converted data. If this option"
   echo "                      is not specified, the converted data will be placed"
-  echo "                      in \`Subject ID\`/raw, in the working directory,"
-  echo "                      where \`Subject ID\` is read from the scan log."
+  echo "                      in {Subject ID}/raw, in the working directory,"
+  echo "                      where {Subject ID} is read from the scan log."
   echo "  --u <user>          Name of server user [default: $USER]."
   echo "  --labdir <dir>      Lab directory on server [default: $PF_LAB_DIR]."
   echo "  --no-clean          Don't delete redundant rec files."
@@ -65,10 +66,10 @@ elif [[ $1 == -h || $1 == --help ]]; then
   exit
 fi
   
-# misc variables
+# Initialize a few variables.
 args=$@
 now=`date '+%m-%d %H:%H:%S'`
-name=`basename $0`
+name=${0##*/}
 study=
 scansub=
 sub=
@@ -128,7 +129,7 @@ if [[ ! -f $scanlog ]]; then
   exit 1
 fi
 
-# Read scan log run #, run name pairs
+# Read scan log scan number, run name pairs. Check formats.
 runs=( `awk 'BEGIN {RS="[\r\n]+"} /^[^#].*$/ {print $1}' $scanlog` )
 names=( `awk 'BEGIN {RS="[\r\n]+"} /^[^#].*$/ {print $2}' $scanlog` )
 if (( ${#runs[@]} != ${#names[@]} )); then
@@ -138,12 +139,12 @@ fi
 re='^[1-9][0-9]?$'
 for run in ${runs[@]}; do
   if [[ ! $run =~ $re ]]; then
-    echo "ERROR: Scan log has bad format. First column should be run nums < 100." >&2
+    echo "ERROR: Scan log has bad format. First column should be integer run numbers." >&2
     exit 1
   fi
 done
 
-# read study, subject id, scanner subject id from scan log if necessary
+# Read study, subject id, scanner subject id from scan log if necessary.
 if [[ -z $study ]]; then
   study=`read_sl $scanlog "Study"`
 fi
@@ -155,6 +156,7 @@ if [[ -z $outdir ]]; then
   outdir=$sub/raw
 fi
 
+# Validate.
 if [[ -e $outdir ]]; then
   echo "WARNING: Output directory $outdir already exists." >&2
   while [[ -e $outdir ]]; do
@@ -184,7 +186,7 @@ if [[ ${PIPESTATUS[0]} != 0 ]]; then
 fi
 
 echo "Converting to nifti and renaming..." | tee -a $log
-for i in `seq 0 $((${#runs[@]}-1))`; do
+for ((i=0; i < ${#runs[@]}; i++)); do
   run=${runs[i]}
   newname=${names[i]}
   runf=`echo $pardir/*_${run}_1.par`
@@ -205,7 +207,7 @@ for i in `seq 0 $((${#runs[@]}-1))`; do
   fi
 done
 
-# checking if there were any pars left behind
+# Check if there were any pars left behind.
 expand_runs=${runs[@]}
 for run in $pardir/*_1.par; do
   run_num=`echo $run | sed 's@\(.*_\)\([1-9][0-9]\?\)\(_1\.par\)@\2@'`
@@ -223,7 +225,7 @@ if [[ -z $nocleanup ]]; then
   done
 fi
 
-# fix permissions
+# Fix permissions.
 find $pardir -type f -exec chmod 660 {} \;
 find $pardir -type d -exec chmod 770 {} \;
 

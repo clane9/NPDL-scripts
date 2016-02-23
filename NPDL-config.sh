@@ -52,6 +52,10 @@ fi
 PATH=$PATH:$NPDL_SCRIPT_DIR/bin
 source $NPDL_SCRIPT_DIR/lib/NPDL-funcs.sh
 
+# Set default SUBJECTS_DIR. Important because many functions rely on the
+# existence of 32k_fs_LR surfaces.
+SUBJECTS_DIR=$NPDL_SCRIPT_DIR/subjects
+
 # ``parfetch`` configuration variables.
 # Assign according to your setup.
 PF_SERVER_ADDR=

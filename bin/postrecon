@@ -22,7 +22,7 @@ if [[ $# == 0 || $1 == -h || $1 == --help ]]; then
   echo
   echo "Perform FSL brain extraction and volume-based registration with MNI 152."
   echo "Convert surface outputs of recon-all to gifti format. Outputs are placed"
-  echo "in $SUBJECTS_DIR/\`<subj>\`/"
+  echo "in $SUBJECTS_DIR/{subj}/"
   exit
 fi
 
@@ -46,8 +46,6 @@ if [[ ! -d $surfdir ]]; then
   err "$surfdir does not exist"
 fi
 
-# TODO: Remove this hardcoded path reference. Resolve location of 32k_fs_LR at
-# configure-time.
 downsamp_surfdir=$SUBJECTS_DIR/32k_fs_LR/surf
 if [[ ! -d $downsamp_surfdir ]]; then
   err "$downsamp_surfdir does not exist"
