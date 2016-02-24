@@ -17,7 +17,7 @@ warn () {
 
 num_check () {
   # checks if input is a number. neg or pos; int or float
-  re='^-?([0-9]+)?[.]?[0-9]+$'
+  local re='^-?([0-9]+)?[.]?[0-9]+$'
   if ! [[ $1 =~ $re ]] ; then
    err "$1 is not a number"
   fi
@@ -25,7 +25,7 @@ num_check () {
 
 int_check () {
   # checks if input is an int
-  re='^-?[1-9][0-9]*$'
+  local re='^-?[1-9][0-9]*$'
   if ! [[ $1 =~ $re ]] ; then
    err "$1 is not an integer."
   fi
@@ -43,7 +43,7 @@ calcmax () {
   # Usage: calcmax <num-1>...
   # Calculates max of list of numbers.
   # E.g.: calcmax 1 2 3 4 5
-  vector=$@
+  local vector=$@
   python -c "print max(map(float, \"$vector\".split()))"
 }
 
@@ -51,14 +51,44 @@ normalize () {
   # Usage: normalize <in-txt> <out-txt>
   # Normalizes a numeric vector in a text file, outputs a text file.
   # E.g.: normalize vector.txt vector_norm.txt
-  input=$1
-  output=$2
+  local input=$1
+  local output=$2
   python - <<END
 import numpy as np
 
 numbers = np.genfromtxt("$input")
 norm_numbers = (numbers - np.mean(numbers))/np.std(numbers)
 np.savetxt("$output", norm_numbers.reshape(-1, 1))
+END
+}
+
+make_lin_trend () {
+  # Usage: make_lin_trend <num-TRs> <out-txt>
+  # Generates a mean-centered linear trend covariate.
+  # E.g.: make_lin_trend 294 lin_trend.txt
+  local num_trs=$1
+  local output=$2
+  python - <<END
+import numpy as np
+
+lin_trend = np.linspace(-1.0, 1.0, $num_trs)
+np.savetxt("$output", lin_trend.reshape(-1, 1))
+END
+}
+
+make_spike_reg () {
+  # Usage: make_spike_reg <num-TRs> <idx> <out-txt>
+  # Generates a spike regressor at <idx> (0-based)
+  # E.g.: make_spike_reg 294 5 spike.txt
+  local num_trs=$1
+  local spike_idx=$2
+  local output=$3
+  python - <<END
+import numpy as np
+
+spike = np.zeros(($num_trs, 1))
+spike[$idx] = 1.0
+np.savetxt("$output", spike)
 END
 }
 
@@ -91,10 +121,7 @@ elif [[ $1 == -h || $1 == --help ]]; then
   echo "  --hpf <secs>         High pass filter cutoff in seconds. This is the"
   echo "                       longest cycle that will remain in the data [default: 128]."
   echo "  --slice <order>      Perform slice timing correction. Order can be: u (up),"
-  echo "                       d (down), or i (interleaved) (e.g. --slice u)." 
-  echo "  --fdrms <thr>        Detect motion outliers using FDRMS metric."
-  echo "                       (See FMRIB Technical Report TR99MJ1.) Set your own"
-  echo "                       threshold in mm. [default: 1.5]"
+  echo "                       d (down), or i (interleaved) (e.g. --slice u)."
   echo "  --fix <mode>         Peform FIX denoising. Specify which steps to perform"
   echo "                       with required mode argument. Options include: i (ica),"
   echo "                       f (feature extraction), c (classification)"
@@ -106,24 +133,34 @@ elif [[ $1 == -h || $1 == --help ]]; then
   echo "  --fixT <thr>         Specify the FIX classification threshold. Higher values"
   echo "                       mean more components classified as noise. Sensible values"
   echo "                       are 5-20. (Only relevant if running FIX.) [default: 10]"
+  echo "  --nuis-reg <mode>    Regress out nuisance covariates: white matter signal,"
+  echo "                       CSF signal, or linear trend. Mode should be a comma-"
+  echo "                       separated list of: wm, csf, or lin (E.g. --mode wm,lin)."
+  echo "                       (Note: You can always include these in your GLM, rather"
+  echo "                       regress out here, which will be less aggressive.)"
+  echo "  --fdrms <thr>        Detect motion outliers using FDRMS metric."
+  echo "                       (See FMRIB Technical Report TR99MJ1.) Set your own"
+  echo "                       threshold in mm. [default: 1.5]"
+  echo "  --dvars <thr>        Detect motion outliers using DVARS metric (see Power et"
+  echo "                       al 2012). Set you own threshold in PSC * 10."
+  echo "                       [default: 75% + 1.5*IQR]"
   echo "  --dil <mm>           Dilate the surface mapped data. (To fill in small holes"
   echo "                       with nearby values.)"
   echo "  --fwhm <mm>          Smoothing kernel in mm. [default: 2]"
   echo "  --stop <stage>       Stop processing after a specific stage. Stages are:"
-  echo "                       (1) FEAT processing, (2) motion artifact detection"
-  echo "                       (3) anatomical registration (4) WM signal (5) FIX"
-  echo "                       denoising, (6) surface mapping, dilating, smoothing" 
+  echo "                       (1) FEAT processing, (2) anatomical registration,"
+  echo "                       (3) FIX denoising, (4) nuisance regression,"
+  echo "                       (5) motion artifact detection, (6) surface mapping,"
+  echo "                       dilating, and smoothing (E.g. --stop 4)." 
   echo "  --restart <stage>    Restart processing from a specific stage (2-6)."
   echo "  --log <logfile>      Specify the logfile."
   echo
   exit
 fi
 
-
 # defaults
 hpf=128
 slorder=
-fdrms=1.5
 dofix=
 fixmode=
 if [[ -z $FIX_DIR ]]; then
@@ -132,6 +169,9 @@ else
   fixW=$FIX_DIR/training_files/$FIX_RDATA
 fi
 fixT=10
+nuis_reg=
+fdrms=1.5
+dvars=
 dil=0
 fwhm=2
 stpstage=6
@@ -169,11 +209,6 @@ while [[ $1 == -* ]]; do
       shift
       shift
       ;;
-    --fdrms)
-      fdrms=$2
-      shift
-      shift
-      ;;
     --fix)
       dofix=TRUE
       fixmode=$2
@@ -187,6 +222,21 @@ while [[ $1 == -* ]]; do
       ;;
     --fixT)
       fixT=$2
+      shift
+      shift
+      ;;
+    --nuis-reg)
+      nuis_reg=$2
+      shift
+      shift
+      ;;
+    --fdrms)
+      fdrms=$2
+      shift
+      shift
+      ;;
+    --dvars)
+      dvars=$2
       shift
       shift
       ;;
@@ -282,6 +332,9 @@ fi
 # check numerical options
 int_check $hpf
 num_check $fdrms
+if [[ -n $dvars ]]; then
+  num_check $dvars
+fi
 num_check $fwhm
 num_check $dil
 
@@ -303,6 +356,17 @@ if [[ -n $slorder ]]; then
   esac
 else
   slorder=0
+fi
+
+# Check nuisance regression option.
+if [[ -n $nuis_reg ]]; then
+  nuis_reg=`echo $nuis_reg | tr , " "`
+  testmode="wm csf lin"
+  for cov in $nuis_reg; do
+    if [[ ${testmode/$cov} == $testmode ]]; then
+      err "Bad nuisance covariate name $cov. Only wm, csf, or lin."
+    fi
+  done
 fi
 
 # check FIX arguments
@@ -426,58 +490,9 @@ fi
 # exit if done at this stage
 (( $stpstage == 1 )) && cleanup
 
-## STAGE 2
-## Artifact detection
-if (( $ststage <= 2 )); then
-  mkdir $featdir/art 2>/dev/null
-  echo "(id=$id) Checking for motion spikes (fdrms metric)..." | tee -a $log
-  # important if re-starting
-  rm $featdir/art/fdrms.* 2>/dev/null
-  cp $featdir/mc/prefiltered_func_data_mcf_rel.rms $featdir/art/fdrms.values.txt
-  idx=0
-  fdrms_vals=`cat $featdir/art/fdrms.values.txt`
-  for val in $fdrms_vals; do
-    compar=`echo "$val >= $fdrms" | bc -l`
-    if [[ $compar == 1 ]]; then
-      regressor=
-      fmtstring=
-      for i in `seq 0 $(($nvols - 1))`; do
-        fmtstring="$fmtstring%d\n"
-        if [[ $i == $idx ]]; then
-          regressor="$regressor 1"
-        else
-          regressor="$regressor 0"
-        fi
-      done
-      printf '%d\t%.3f\n' $(($idx + 1)) $val >> $featdir/art/fdrms.drops.txt
-      zpadidx=`printf '%03d' $idx`
-      printf "$fmtstring" $regressor >> $tmpdir/fdrms-$zpadidx.txt
-    fi
-    idx=$(($idx + 1))
-  done
-  TEST=`ls $tmpdir | grep 'fdrms-[0-9]\{3\}\.txt'`
-  if [[ -n $TEST ]]; then
-    paste $tmpdir/fdrms-*txt >> $featdir/art/fdrms.confound.txt
-  fi
-
-  # make fdrms plot
-  for i in `seq 0 $(($nvols - 1))`; do
-    echo $fdrms >> $tmpdir/fdrmsthr_ts.txt
-  done
-  fdrms_ymin=0
-  fdrms_ymax1=`calcmax $fdrms_vals`
-  fdrms_ymax2=`echo "$fdrms * 1.5" | bc -l`
-  fdrms_ymax=`calcmax $fdrms_ymax1 $fdrms_ymax2`
-  fsl_tsplot -i $featdir/art/fdrms.values.txt,$tmpdir/fdrmsthr_ts.txt \
-    -o $featdir/art/fdrms.png \
-    -t "FDRMS values (thresh=$fdrms)" \
-    --ymin=$fdrms_ymin --ymax=$fdrms_ymax 2>&1 1>/dev/null | tee -a $log
-fi
-(( $stpstage == 2 )) && cleanup
-
-## STAGE 3
+## STAGE 2 
 ## Anatomical registration
-if (( $ststage <= 3 )); then
+if (( $ststage <= 2 )); then
   echo "(id=$id) Registering functional data to MPRAGE..." | tee -a $log
   mkdir $featdir/surfreg
   # make brain-extracted example_func
@@ -512,45 +527,11 @@ if (( $ststage <= 3 )); then
     $featdir/surfreg/surf_outline.png
   command_check "saving surface outline image"
 fi
-(( $stpstage == 3 )) && cleanup
+(( $stpstage == 2 )) && cleanup
 
-## STAGE 4
-## White matter signal
-if (( $ststage <= 4 )); then
-  echo "(id=$id) Computing average gm, wm & csf signal..." | tee -a $log
-  mkdir $featdir/art 2>/dev/null
-  # resampling aseg to functional space. using nearest interpolation so as not to mix up labels
-  mri_vol2vol --mov $featdir/example_func.nii.gz \
-    --targ $subjdir/mri/aseg.mgz --reg $featdir/surfreg/register.dat \
-    --inv --interp nearest --o $tmpdir/aseg.nii.gz 2>&1 1>/dev/null | tee -a $log
-  command_check "aseg resampling"
-  # extract regions from aseg volume: left and right ventricls, white matter 
-  thrs=( 4 43 2 41 3 42 )
-  masknames=( csf.lh csf.rh wm.lh wm.rh gm.lh gm.rh )
-  for i in {0..5}; do
-    fslmaths $tmpdir/aseg.nii.gz -thr ${thrs[i]} -uthr ${thrs[i]} -bin \
-      $tmpdir/${masknames[i]}.nii.gz 2>&1 1>/dev/null | tee -a $log
-  done
-  for region in csf wm gm; do
-    # combine left and right masks, no erosion
-    fslmaths $tmpdir/$region.lh.nii.gz -max $tmpdir/$region.rh.nii.gz \
-      $featdir/art/$region.nii.gz 2>&1 1>/dev/null | tee -a $log
-    # extract mean time series
-    fslmeants -i $func -m $featdir/art/$region.nii.gz \
-      -o $featdir/art/$region.values.txt
-    # Make confound regressor by normalizing region signal.
-    normalize $featdir/art/$region.values.txt $featdir/art/$region.confound.txt
-  done
-  # plot average time series for three regions.
-  fsl_tsplot -i $featdir/art/gm.values.txt,$featdir/art/wm.values.txt,$featdir/art/csf.values.txt \
-    --labels=grey.m,white.m,csf -o $featdir/art/gm-wm-csf.values.png \
-    -t "Average time-series across tissue types"
-fi
-(( $stpstage == 4 )) && cleanup
-
-## STAGE 5
+## STAGE 3 
 ## FIX denoising
-if (( $ststage <= 5 )) && [[ -n $dofix ]] ; then
+if (( $ststage <= 3 )) && [[ -n $dofix ]] ; then
   echo "(id=$id) Performing FIX denoising..." | tee -a $log
   # MELODIC ICA
   if [[ -n $dofixi ]]; then
@@ -595,6 +576,148 @@ if (( $ststage <= 5 )) && [[ -n $dofix ]] ; then
     fix -a $featdir/fix4melview_${fixWname}_thr${fixT}.txt 2>&1 1>/dev/null | tee -a $log
     command_check "FIX noise removal"
   fi
+fi
+(( $stpstage == 3 )) && cleanup
+
+## STAGE 4
+## Nuisance regression
+if (( $ststage <= 4 )); then
+  echo "(id=$id) Computing average gm, wm & csf signal..." | tee -a $log
+  mkdir $featdir/art 2>/dev/null
+  # resampling aseg to functional space. using nearest interpolation so as not to mix up labels
+  mri_vol2vol --mov $featdir/example_func.nii.gz \
+    --targ $subjdir/mri/aseg.mgz --reg $featdir/surfreg/register.dat \
+    --inv --interp nearest --o $tmpdir/aseg.nii.gz 2>&1 1>/dev/null | tee -a $log
+  command_check "aseg resampling"
+
+  # extract regions from aseg volume: left and right ventricls, white matter 
+  thrs=( 4 43 2 41 3 42 )
+  masknames=( csf.lh csf.rh wm.lh wm.rh gm.lh gm.rh )
+  for i in {0..5}; do
+    fslmaths $tmpdir/aseg.nii.gz -thr ${thrs[i]} -uthr ${thrs[i]} -bin \
+      $tmpdir/${masknames[i]}.nii.gz 2>&1 1>/dev/null | tee -a $log
+  done
+
+  for region in csf wm gm; do
+    # combine left and right masks, no erosion
+    fslmaths $tmpdir/$region.lh.nii.gz -max $tmpdir/$region.rh.nii.gz \
+      $featdir/art/$region.nii.gz 2>&1 1>/dev/null | tee -a $log
+    # extract mean time series
+    fslmeants -i $func -m $featdir/art/$region.nii.gz \
+      -o $featdir/art/$region.values.txt
+    # Make confound regressor by normalizing region signal.
+    normalize $featdir/art/$region.values.txt $featdir/art/$region.confound.txt
+  done
+
+  # plot average time series for three regions.
+  fsl_tsplot -i $featdir/art/gm.values.txt,$featdir/art/wm.values.txt,$featdir/art/csf.values.txt \
+    --labels=grey.m,white.m,csf -o $featdir/art/gm-wm-csf.values.png \
+    -t "Average time-series across tissue types"
+ 
+  # Generate linear trend nuisance covariate.
+  make_lin_trend $nvols $featdir/art/lin.confound.txt
+  # Regress out nuisance covariates if asked for.
+  if [[ -n $nuis_reg ]]; then
+    echo "(id=$id) Regressing nuisance covarariates $nuis_reg..." | tee -a $log
+    nuis_dm=$featdir/art/nuisance.dm.txt
+    rm $nuis_dm 2>/dev/null # Important if restarting
+    for cov in $nuis_reg; do
+      paste $featdir/art/$cov.confound.txt $nuis_dm > $nuis_dm
+    done
+    mv $func $tmpdir/prefilt.nii.gz 
+    fsl_regfilt -i $tmpdir/prefilt.nii.gz -d $nuis_dm \
+      -o $func -m $featdir/mask.nii.gz 2>&1 1>/dev/null | tee -a $log
+    command_check "Nuisance regression"
+  fi
+fi
+(( $stpstage == 4 )) && cleanup
+
+## STAGE 5 
+## Artifact detection
+if (( $ststage <= 5 )); then
+  mkdir $featdir/art 2>/dev/null
+  echo "(id=$id) Checking for motion spikes (fdrms metric)..." | tee -a $log
+  # important if re-starting
+  rm $featdir/art/fdrms.* 2>/dev/null
+  cp $featdir/mc/prefiltered_func_data_mcf_rel.rms $featdir/art/fdrms.values.txt
+  
+  idx=0
+  fdrms_vals=`cat $featdir/art/fdrms.values.txt`
+  for val in $fdrms_vals; do
+    compar=`echo "$val >= $fdrms" | bc -l`
+    if [[ $compar == 1 ]]; then
+      printf '%d\t%.3f\n' $(($idx + 1)) $val >> $featdir/art/fdrms.drops.txt
+      zpadidx=`printf '%03d' $idx`
+      make_spike_reg $nvols $idx $tmpdir/fdrms-$zpadidx.txt
+    fi
+    idx=$(($idx + 1))
+  done
+  TEST=`ls $tmpdir | grep 'fdrms-[0-9]\{3\}\.txt'`
+  if [[ -n $TEST ]]; then
+    paste $tmpdir/fdrms-*txt >> $featdir/art/fdrms.confound.txt
+  fi
+
+  # make fdrms plot
+  for i in `seq 0 $(($nvols - 1))`; do
+    echo $fdrms >> $tmpdir/fdrmsthr_ts.txt
+  done
+  fdrms_ymin=0
+  fdrms_ymax1=`calcmax $fdrms_vals`
+  fdrms_ymax2=`echo "$fdrms * 1.5" | bc -l`
+  fdrms_ymax=`calcmax $fdrms_ymax1 $fdrms_ymax2`
+  fsl_tsplot -i $featdir/art/fdrms.values.txt,$tmpdir/fdrmsthr_ts.txt \
+    -o $featdir/art/fdrms.png \
+    -t "FDRMS values (thresh=$fdrms)" \
+    --ymin=$fdrms_ymin --ymax=$fdrms_ymax 2>&1 1>/dev/null | tee -a $log
+
+  echo "(id=$id) Checking for motion spikes (dvars metric)..." | tee -a $log
+  if [[ -n $dvars ]]; then
+    thresharg="--thresh=$dvars"
+  else
+    thresharg=
+  fi
+  fsl_motion_outliers -i $func -o $featdir/art/dvars.confound.txt \
+    -m $featdir/mask.nii.gz \
+    -s $featdir/art/dvars.values.txt \
+    --dvars \
+    --nomoco -v $thresharg 2>&1 1>$tmpdir/dvarsthr.txt | tee -a $log
+  command_check "dvars outlier detection"
+  # find out what the dvars threshold was (if 75% + 1.5 IQR)
+  if [[ -z $dvars ]]; then
+    thresh_line=`cat $tmpdir/dvarsthr.txt | grep "Found [0-9]\+ outliers over"`
+    dvars=`echo $thresh_line | sed 's@\(Found [0-9]\+ outliers over \)\(.*\)@\2@'`
+  fi
+  
+  # record which timepoints were dropped and their values
+  idx=1
+  dvars_vals=`cat $featdir/art/dvars.values.txt`
+  for val in $dvars_vals; do
+    compar=`echo "$val >= $dvars" | bc -l`
+    if [[ $compar == 1 ]]; then
+      printf '%d\t%.3f\n' $idx $val >> $featdir/art/dvars.drops.txt
+    fi
+    idx=$(($idx + 1))
+  done
+  
+  # make dvars plot
+  for i in `seq 0 $(($nvols - 1))`; do
+    echo $dvars >> $tmpdir/dvarsthr_ts.txt
+  done
+  dvars_ymin=0
+  dvars_ymax1=`calcmax $dvars_vals`
+  dvars_ymax2=`echo "$dvars * 1.5" | bc -l`
+  dvars_ymax=`calcmax $dvars_ymax1 $dvars_ymax2`
+  fsl_tsplot -i $featdir/art/dvars.values.txt,$tmpdir/dvarsthr_ts.txt \
+    -o $featdir/art/dvars.png \
+    -t "Dvars values (thresh=$dvars)" \
+    --ymin=$dvars_ymin --ymax=$dvars_ymax 2>&1 1>/dev/null | tee -a $log
+
+  echo "(id=$id) Generating tSNR and tSD images..." | tee -a $log
+  fslmaths $func -Tstd -mas $featdir/mask.nii.gz \
+    $featdir/art/filtered_func_tSD.nii.gz 2>&1 1>/dev/null | tee -a $log
+  fslmaths $func -Tmean -div $featdir/art/filtered_func_tSD.nii.gz \
+    -mas $featdir/mask.nii.gz \
+    $featdir/art/filtered_func_tSNR.nii.gz 2>&1 1>/dev/null | tee -a $log
 fi
 (( $stpstage == 5 )) && cleanup
 
