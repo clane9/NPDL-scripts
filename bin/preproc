@@ -151,7 +151,7 @@ elif [[ $1 == -h || $1 == --help ]]; then
   echo "                       (1) FEAT processing, (2) anatomical registration,"
   echo "                       (3) FIX denoising, (4) nuisance regression,"
   echo "                       (5) motion artifact detection, (6) surface mapping,"
-  echo "                       dilating, and smoothing (E.g. --stop 4)." 
+  echo "                       dilating, and smoothing (E.g. --stop 4)."
   echo "  --restart <stage>    Restart processing from a specific stage (2-6)."
   echo "  --log <logfile>      Specify the logfile."
   echo
@@ -340,7 +340,7 @@ num_check $dil
 
 # check slice timing option
 if [[ -n $slorder ]]; then
-  case $slorder in 
+  case $slorder in
     u)
       slorder=1
       ;;
@@ -441,7 +441,7 @@ if (( $ststage <= 1 )); then
   if (( $nvols < 50 )); then
     warn "Input $input has less than 50 timepoints."
   fi
-  
+
   # output checking
   if [[ ! -d `dirname $output` ]]; then
     err "Directory above output $output does not exist."
@@ -490,7 +490,7 @@ fi
 # exit if done at this stage
 (( $stpstage == 1 )) && cleanup
 
-## STAGE 2 
+## STAGE 2
 ## Anatomical registration
 if (( $ststage <= 2 )); then
   echo "(id=$id) Registering functional data to MPRAGE..." | tee -a $log
@@ -529,8 +529,12 @@ if (( $ststage <= 2 )); then
 fi
 (( $stpstage == 2 )) && cleanup
 
-## STAGE 3 
+## STAGE 3
 ## FIX denoising
+# TODO: Need to sort out if we want to use Fix or Aroma going forward.
+# Fix heavily depends on good training data, to limited apparent benefit...
+# TODO: What is the output file of the artifact removal step? is filtered_func
+# modified in place?
 if (( $ststage <= 3 )) && [[ -n $dofix ]] ; then
   echo "(id=$id) Performing FIX denoising..." | tee -a $log
   # MELODIC ICA
@@ -540,6 +544,7 @@ if (( $ststage <= 3 )) && [[ -n $dofix ]] ; then
       --report 2>&1 1>/dev/null | tee -a $log
     command_check "MELODIC ICA"
   fi
+
   # Feature extraction
   if [[ -n $dofixf ]]; then
     echo "(id=$id) FIX feature extraction..." | tee -a $log
@@ -562,16 +567,17 @@ if (( $ststage <= 3 )) && [[ -n $dofix ]] ; then
     fix -f $featdir 2>&1 1>/dev/null | tee -a $log
     command_check "FIX feature extraction"
   fi
+
   # FIX classification
   if [[ -n $dofixc ]]; then
     echo "(id=$id) FIX classification..." | tee -a $log
     fix -c $featdir $fixW $fixT 2>&1 1>/dev/null | tee -a $log
     command_check "FIX classification"
   fi
+
   # FIX removal of artifactual components
   if [[ -n $dofixr ]]; then
     echo "(id=$id) FIX artifact removal..." | tee -a $log
-    # this variable already exists, but I'm defining it again for clarity
     fixWname=`basename ${fixW%.RData}`
     fix -a $featdir/fix4melview_${fixWname}_thr${fixT}.txt 2>&1 1>/dev/null | tee -a $log
     command_check "FIX noise removal"
@@ -590,7 +596,7 @@ if (( $ststage <= 4 )); then
     --inv --interp nearest --o $tmpdir/aseg.nii.gz 2>&1 1>/dev/null | tee -a $log
   command_check "aseg resampling"
 
-  # extract regions from aseg volume: left and right ventricls, white matter 
+  # extract regions from aseg volume: left and right ventricls, white matter
   thrs=( 4 43 2 41 3 42 )
   masknames=( csf.lh csf.rh wm.lh wm.rh gm.lh gm.rh )
   for i in {0..5}; do
@@ -613,7 +619,7 @@ if (( $ststage <= 4 )); then
   fsl_tsplot -i $featdir/art/gm.values.txt,$featdir/art/wm.values.txt,$featdir/art/csf.values.txt \
     --labels=grey.m,white.m,csf -o $featdir/art/gm-wm-csf.values.png \
     -t "Average time-series across tissue types"
- 
+
   # Generate linear trend nuisance covariate.
   make_lin_trend $nvols $featdir/art/lin.confound.txt
   # Regress out nuisance covariates if asked for.
@@ -624,7 +630,7 @@ if (( $ststage <= 4 )); then
     for cov in $nuis_reg; do
       paste $featdir/art/$cov.confound.txt $nuis_dm > $nuis_dm
     done
-    mv $func $tmpdir/prefilt.nii.gz 
+    mv $func $tmpdir/prefilt.nii.gz
     fsl_regfilt -i $tmpdir/prefilt.nii.gz -d $nuis_dm \
       -o $func -m $featdir/mask.nii.gz 2>&1 1>/dev/null | tee -a $log
     command_check "Nuisance regression"
@@ -632,7 +638,7 @@ if (( $ststage <= 4 )); then
 fi
 (( $stpstage == 4 )) && cleanup
 
-## STAGE 5 
+## STAGE 5
 ## Artifact detection
 if (( $ststage <= 5 )); then
   mkdir $featdir/art 2>/dev/null
@@ -640,7 +646,7 @@ if (( $ststage <= 5 )); then
   # important if re-starting
   rm $featdir/art/fdrms.* 2>/dev/null
   cp $featdir/mc/prefiltered_func_data_mcf_rel.rms $featdir/art/fdrms.values.txt
-  
+
   idx=0
   fdrms_vals=`cat $featdir/art/fdrms.values.txt`
   for val in $fdrms_vals; do
@@ -687,7 +693,7 @@ if (( $ststage <= 5 )); then
     thresh_line=`cat $tmpdir/dvarsthr.txt | grep "Found [0-9]\+ outliers over"`
     dvars=`echo $thresh_line | sed 's@\(Found [0-9]\+ outliers over \)\(.*\)@\2@'`
   fi
-  
+
   # record which timepoints were dropped and their values
   idx=1
   dvars_vals=`cat $featdir/art/dvars.values.txt`
@@ -698,7 +704,7 @@ if (( $ststage <= 5 )); then
     fi
     idx=$(($idx + 1))
   done
-  
+
   # make dvars plot
   for i in `seq 0 $(($nvols - 1))`; do
     echo $dvars >> $tmpdir/dvarsthr_ts.txt
@@ -709,7 +715,7 @@ if (( $ststage <= 5 )); then
   dvars_ymax=`calcmax $dvars_ymax1 $dvars_ymax2`
   fsl_tsplot -i $featdir/art/dvars.values.txt,$tmpdir/dvarsthr_ts.txt \
     -o $featdir/art/dvars.png \
-    -t "Dvars values (thresh=$dvars)" \
+    -t "DVARS values (thresh=$dvars)" \
     --ymin=$dvars_ymin --ymax=$dvars_ymax 2>&1 1>/dev/null | tee -a $log
 
   echo "(id=$id) Generating tSNR and tSD images..." | tee -a $log
@@ -718,6 +724,16 @@ if (( $ststage <= 5 )); then
   fslmaths $func -Tmean -div $featdir/art/filtered_func_tSD.nii.gz \
     -mas $featdir/mask.nii.gz \
     $featdir/art/filtered_func_tSNR.nii.gz 2>&1 1>/dev/null | tee -a $log
+  # Make images.
+  for imgtype in tSD tSNR; do
+    slicer $featdir/art/filtered_func_$imgtype.nii.gz -S 2 720 \
+      $featdir/art/filtered_func_$imgtype.png 2>&1 1>/dev/null | tee -a $log
+  done
+
+  echo "(id=$id) Saving animated data gifs..." | tee -a $log
+  # Save animated gifs of preprocessed and raw func data (each takes ~1.5min)
+  make_data_gif $input $featdir/raw_func.gif
+  make_data_gif $func $featdir/filtered_func.gif
 fi
 (( $stpstage == 5 )) && cleanup
 
