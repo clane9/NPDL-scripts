@@ -788,5 +788,35 @@ imgtrim () {
   convert $img $rembgstr -trim $outimg
 }
 
+make_data_gif () {
+  if [[ $# == 0 || $1 == -h || $1 == --help ]]; then
+    echo "make_data_gif <func-data> <out-gif>"
+    echo
+    echo "Make an animated gif for one run of functional data."
+    return
+  fi
 
-export -f command_check checksurf checkffx odd_or_even beta_calc threshroi latcheck percentroi label2mask takesnap imgtrim latcheck2
+  if [[ $# != 2 ]]; then
+    echo "ERROR: Incorrect number of args." >&2
+    return 1
+  fi
+
+  local func=$1
+  local outgif=$2
+  local tmpdir=`mktemp -d /tmp/data-gif-XXX`
+
+  fslsplit $func $tmpdir/split-
+
+  for frame in $tmpdir/split-*; do
+    local img=${frame/.nii.gz/.png}
+    slicer $frame -u -a $img
+    local tr_num=$(echo $img | sed 's@\(.*split-\)\(.*\)\(\.png\)@\2@')
+    convert $img -background black -fill white label:$tr_num \
+      -gravity Center -append $img
+  done
+
+  convert -delay 10 -loop 0 $tmpdir/split-*.png $outgif
+  rm -r $tmpdir
+}
+
+export -f command_check checksurf checkffx odd_or_even beta_calc threshroi latcheck percentroi label2mask takesnap imgtrim latcheck2 make_data_gif
