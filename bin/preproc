@@ -40,14 +40,26 @@ command_check () {
 }
 
 calcmax () {
-  tmpmax=$1
-  while [[ -n $1 ]]; do
-    if [[ `echo "$1 > $tmpmax" | bc -l` == 1 ]]; then
-      tmpmax=$1
-    fi
-    shift
-  done
-  echo $tmpmax
+  # Usage: calcmax <num-1>...
+  # Calculates max of list of numbers.
+  # E.g.: calcmax 1 2 3 4 5
+  vector=$@
+  python -c "print max(map(float, \"$vector\".split()))"
+}
+
+normalize () {
+  # Usage: normalize <in-txt> <out-txt>
+  # Normalizes a numeric vector in a text file, outputs a text file.
+  # E.g.: normalize vector.txt vector_norm.txt
+  input=$1
+  output=$2
+  python - <<END
+import numpy as np
+
+numbers = np.genfromtxt("$input")
+norm_numbers = (numbers - np.mean(numbers))/np.std(numbers)
+np.savetxt("$output", norm_numbers.reshape(-1, 1))
+END
 }
 
 cleanup () {
@@ -482,13 +494,30 @@ if (( $ststage <= 3 )); then
     --reg $featdir/surfreg/register.dat --init-reg $featdir/surfreg/flirt_init.dat \
     --t2 2>&1 1>/dev/null | tee -a $log
   command_check "surface registration"
+  # Pull back white surface to functional space for QA.
+  for hemi in lh rh; do
+    mri_surf2vol --mkmask --hemi $hemi --projfrac 0.5 \
+      --reg $featdir/surfreg/register.dat \
+      --template $featdir/example_func.nii.gz \
+      --o $tmpdir/surf_outline.$hemi.nii.gz 2>&1 1>/dev/null | tee -a $log
+    command_check "pull back surface to func space ($hemi)"
+  done
+  fslmaths $tmpdir/surf_outline.lh.nii.gz -max $tmpdir/surf_outline.rh.nii.gz \
+    $featdir/surfreg/surf_outline.nii.gz
+  # Save images of overlaid surface outline
+  overlay 1 1 $featdir/example_func.nii.gz -a \
+    $featdir/surfreg/surf_outline.nii.gz 0.99 1.01 \
+    $featdir/surfreg/surf_outline_overlay.nii.gz 2>&1 1>/dev/null | tee -a $log
+  slicer $featdir/surfreg/surf_outline_overlay.nii.gz -S 2 720 \
+    $featdir/surfreg/surf_outline.png
+  command_check "saving surface outline image"
 fi
 (( $stpstage == 3 )) && cleanup
 
 ## STAGE 4
 ## White matter signal
 if (( $ststage <= 4 )); then
-  echo "(id=$id) Computing average wm & csf signal..." | tee -a $log
+  echo "(id=$id) Computing average gm, wm & csf signal..." | tee -a $log
   mkdir $featdir/art 2>/dev/null
   # resampling aseg to functional space. using nearest interpolation so as not to mix up labels
   mri_vol2vol --mov $featdir/example_func.nii.gz \
@@ -496,30 +525,26 @@ if (( $ststage <= 4 )); then
     --inv --interp nearest --o $tmpdir/aseg.nii.gz 2>&1 1>/dev/null | tee -a $log
   command_check "aseg resampling"
   # extract regions from aseg volume: left and right ventricls, white matter 
-  thrs=( 4 43 2 41 )
-  masknames=( csf.lh csf.rh wm.lh wm.rh )
-  for i in {0..3}; do
+  thrs=( 4 43 2 41 3 42 )
+  masknames=( csf.lh csf.rh wm.lh wm.rh gm.lh gm.rh )
+  for i in {0..5}; do
     fslmaths $tmpdir/aseg.nii.gz -thr ${thrs[i]} -uthr ${thrs[i]} -bin \
       $tmpdir/${masknames[i]}.nii.gz 2>&1 1>/dev/null | tee -a $log
   done
-  for region in csf wm; do
+  for region in csf wm gm; do
     # combine left and right masks, no erosion
     fslmaths $tmpdir/$region.lh.nii.gz -max $tmpdir/$region.rh.nii.gz \
       $featdir/art/$region.nii.gz 2>&1 1>/dev/null | tee -a $log
     # extract mean time series
     fslmeants -i $func -m $featdir/art/$region.nii.gz \
       -o $featdir/art/$region.values.txt
-    # convert to PSC (in particular, demean)
-    mean=`fslstats $func -k $featdir/art/$region.nii.gz -M`
-    rm $featdir/art/$region.confound.txt 2>/dev/null
-    while read line; do
-      val=`echo "($line - $mean) / $mean" | bc -l`
-      echo $val >> $featdir/art/$region.confound.txt
-    done < $featdir/art/$region.values.txt
-    # plot average time series
-    fsl_tsplot -i $featdir/art/$region.values.txt \
-      -o $featdir/art/$region.values.png -t "$region average time-series"
+    # Make confound regressor by normalizing region signal.
+    normalize $featdir/art/$region.values.txt $featdir/art/$region.confound.txt
   done
+  # plot average time series for three regions.
+  fsl_tsplot -i $featdir/art/gm.values.txt,$featdir/art/wm.values.txt,$featdir/art/csf.values.txt \
+    --labels=grey.m,white.m,csf -o $featdir/art/gm-wm-csf.values.png \
+    -t "Average time-series across tissue types"
 fi
 (( $stpstage == 4 )) && cleanup
 
