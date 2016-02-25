@@ -15,10 +15,13 @@ set -a
 # - HCP Workbench (1.1.1)
 # - Mricron (2014-08-04)
 # - Python (2.7) [docopt, matplotlib, nibabel, numpy]
+# - Imagemagick
 
-# Suggested (Needed for FSL-Fix):
-# - R (> 3.2.0) [kernlab, ROCR, class, party, e1071, randomForest]
-# - MATLAB (??)
+# Optional:
+# - FSL-Fix (1.062 beta)
+#   - R (> 3.2.0) [kernlab, ROCR, class, party, e1071, randomForest]
+#   - MATLAB
+# - ICA-AROMA (0.3_beta)
 
 # Assign directory paths below according to your setup.
 
@@ -63,9 +66,10 @@ PF_PORT=22
 PF_LAB_DIR=
 
 # ``preproc`` configuration variables.
-# Assign Fix variables or leave empty if FSL-Fix not installed.
+# Assign Fix/Aroma variables or leave empty if not installed.
 FIX_DIR=
 FIX_RDATA=
+AROMA_DIR=
 PRPRC_TEMP=$NPDL_SCRIPT_DIR/etc/preproc_template_design.fsf
 
 # ------------------------------------------------------------------------------
