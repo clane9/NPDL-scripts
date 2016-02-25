@@ -127,6 +127,7 @@ elif [[ $1 == -h || $1 == --help ]]; then
   echo "                       f (feature extraction), c (classification)"
   echo "                       r (removal). Combine these options to perform a"
   echo "                       sequence (E.g. --fix ifcr)."
+  echo "  --aroma              Run ICA-AROMA denoising."
   echo "  --fixW <weights>     Specify the FIX training weights file to use for FIX"
   echo "                       classification. (Only relevant if running FIX.)"
   echo "                       [default: $FIX_RDATA]"
@@ -149,10 +150,10 @@ elif [[ $1 == -h || $1 == --help ]]; then
   echo "  --fwhm <mm>          Smoothing kernel in mm. [default: 2]"
   echo "  --stop <stage>       Stop processing after a specific stage. Stages are:"
   echo "                       (1) FEAT processing, (2) anatomical registration,"
-  echo "                       (3) FIX denoising, (4) nuisance regression,"
-  echo "                       (5) motion artifact detection, (6) surface mapping,"
-  echo "                       dilating, and smoothing (E.g. --stop 4)."
-  echo "  --restart <stage>    Restart processing from a specific stage (2-6)."
+  echo "                       (3) ICA denoising, (4) high-pass filtering,"
+  echo "                       (5) nuisance regression, (6) motion artifact detection,"
+  echo "                       (7) surface mapping, dilating, and smoothing (E.g. --stop 4)."
+  echo "  --restart <stage>    Restart processing from a specific stage (2-7)."
   echo "  --log <logfile>      Specify the logfile."
   echo
   exit
@@ -161,6 +162,7 @@ fi
 # defaults
 hpf=128
 slorder=
+doaroma=
 dofix=
 fixmode=
 if [[ -z $FIX_DIR ]]; then
@@ -174,7 +176,7 @@ fdrms=1.5
 dvars=
 dil=0
 fwhm=2
-stpstage=6
+stpstage=7
 ststage=
 
 subj=
@@ -207,6 +209,10 @@ while [[ $1 == -* ]]; do
     --slice)
       slorder=$2
       shift
+      shift
+      ;;
+    --aroma)
+      doaroma=TRUE
       shift
       ;;
     --fix)
@@ -295,8 +301,8 @@ elif [[ $# == 1 ]]; then
     err "Incorrect arguments."
   fi
   intre='^-?[1-9][0-9]*$'
-  if [[ ! $ststage =~ $intre ]] || (( $ststage < 2 || $ststage > 6 )); then
-    err "Restart stage should be between 2-6."
+  if [[ ! $ststage =~ $intre ]] || (( $ststage < 2 || $ststage > 7 )); then
+    err "Restart stage should be between 2-7."
   fi
   featdir=${1%/}
   func=$featdir/filtered_func_data.nii.gz
@@ -369,55 +375,57 @@ if [[ -n $nuis_reg ]]; then
   done
 fi
 
+if [[ -n $doaroma && ! -d $AROMA_DIR ]]; then
+  err "ICA-AROMA not installed or AROMA_DIR not set."
+fi
+
 # check FIX arguments
 if [[ -n $dofix ]]; then
   if [[ -z $FIX_DIR ]]; then
-    warn "FIX is not installed. Skipping."
-    dofix=
-  else
-    # check if FIX mode is a substring of ifcr by trying to replace it
-    testmode=ifcr
-    if [[ ${testmode/$fixmode} == $testmode ]]; then
-      err "Bad FIX mode $fixmode. Must be substring of 'ifcr'."
+    err "FIX is not installed or FIX_DIR is not set."
+  fi
+  # check if FIX mode is a substring of ifcr by trying to replace it
+  testmode=ifcr
+  if [[ ${testmode/$fixmode} == $testmode ]]; then
+    err "Bad FIX mode $fixmode. Must be substring of 'ifcr'."
+  fi
+  # decide which stages of FIX should be run
+  [[ $fixmode == *i* ]] && dofixi=TRUE || dofixi=
+  [[ $fixmode == *f* ]] && dofixf=TRUE || dofixf=
+  [[ $fixmode == *c* ]] && dofixc=TRUE || dofixc=
+  [[ $fixmode == *r* ]] && dofixr=TRUE || dofixr=
+  if [[ -z $dofixi && ststage == 1 ]]; then
+    err "Must do ICA if running preproc from start. Add 'i' to FIX mode (e.g. --fix ifcr)."
+  fi
+  if [[ -n $dofixc ]]; then
+    if [[ ! -f $fixW ]]; then
+      err "FIX weights file $fixW doesn't exist."
     fi
-    # decide which stages of FIX should be run
-    [[ $fixmode == *i* ]] && dofixi=TRUE || dofixi=
-    [[ $fixmode == *f* ]] && dofixf=TRUE || dofixf=
-    [[ $fixmode == *c* ]] && dofixc=TRUE || dofixc=
-    [[ $fixmode == *r* ]] && dofixr=TRUE || dofixr=
-    if [[ -z $dofixi && ststage == 1 ]]; then
-      err "Must do ICA if running preproc from start. Add 'i' to FIX mode (e.g. --fix ifcr)."
+    int_check $fixT
+    if (( $fixT < 0 || $fixT > 100 )); then
+      err "FIX thresh must be between 0 and 100 (5-20 recommended)."
     fi
-    if [[ -n $dofixc ]]; then
-      if [[ ! -f $fixW ]]; then
-        err "FIX weights file $fixW doesn't exist."
-      fi
-      int_check $fixT
-      if (( $fixT < 0 || $fixT > 100 )); then
-        err "FIX thresh must be between 0 and 100 (5-20 recommended)."
-      fi
+  fi
+  if (( $ststage > 1 )); then
+    icadir=$featdir/filtered_func_data.ica
+    fixWname=`basename ${fixW%.RData}`
+    classfile=$featdir/fix4melview_${fixWname}_thr${fixT}.txt
+    if [[ -z $dofixi && ! -d $icadir ]]; then
+      err "Can't run FIX without doing ICA. Add 'i' to FIX mode (e.g. --fix ifcr)."
     fi
-    if (( $ststage > 1 )); then
-      icadir=$featdir/filtered_func_data.ica
-      fixWname=`basename ${fixW%.RData}`
-      classfile=$featdir/fix4melview_${fixWname}_thr${fixT}.txt
-      if [[ -z $dofixi && ! -d $icadir ]]; then
-        err "Can't run FIX without doing ICA. Add 'i' to FIX mode (e.g. --fix ifcr)."
-      fi
-      if [[ -z $dofixf && ! -f $featdir/fix/features.csv ]]; then
-        err "Can't run FIX without extracting features. Add 'f' to FIX mode (e.g. --fix ifcr)."
-      fi
-      if [[ -z $dofixc && ! -f $classfile ]]; then
-        err "Can't run FIX without classifying features. Add 'c' to FIX mode (e.g. --fix ifcr)."
-      fi
+    if [[ -z $dofixf && ! -f $featdir/fix/features.csv ]]; then
+      err "Can't run FIX without extracting features. Add 'f' to FIX mode (e.g. --fix ifcr)."
+    fi
+    if [[ -z $dofixc && ! -f $classfile ]]; then
+      err "Can't run FIX without classifying features. Add 'c' to FIX mode (e.g. --fix ifcr)."
     fi
   fi
 fi
 
 if [[ -n $stpstage ]]; then
   int_check $stpstage
-  if (( $stpstage < 1 || $stpstage > 6 )); then
-    err "Stop stage should be between 1-6."
+  if (( $stpstage < 1 || $stpstage > 7 )); then
+    err "Stop stage should be between 1-7."
   fi
   if (( $stpstage < $ststage )); then
     err "Stop stage should be >= restart stage."
@@ -460,7 +468,8 @@ if (( $ststage <= 1 )); then
   sed -i 's@\(set fmri(tr)\)\(.*\)@\1 '$tr'@' $fsf
   sed -i 's@\(set fmri(npts)\)\(.*\)@\1 '$nvols'@' $fsf
   sed -i 's@\(set fmri(st)\)\(.*\)@\1 '$slorder'@' $fsf
-  sed -i 's@\(set fmri(paradigm_hp)\)\(.*\)@\1 '$hpf'@' $fsf
+  # don't do high-pass filtering in feat, so we can use ica aroma.
+  sed -i 's@\(set fmri(temphp_yn)\)\(.*\)@\1 '0'@' $fsf
 
   # running feat
   echo "(id=$id) Running feat..." | tee -a $log
@@ -479,6 +488,7 @@ if (( $ststage <= 1 )); then
   echo "$scriptname $args" >> $featdir/command.txt
 
   # correcting global signal and making a figure
+  ## Why do we have to do this again? If scaling also happens in feat?
   echo "(id=$id) Grand mean intensity scaling..." | tee -a $log
   globmean=`fslstats $func -k $featdir/mask.nii.gz -M`
   scaler=`echo "10000/$globmean" | bc -l`
@@ -507,7 +517,7 @@ if (( $ststage <= 2 )); then
   command_check "surface reg flirt init"
   bbregister --s $subj --mov $featdir/example_func_brain.nii.gz \
     --reg $featdir/surfreg/register.dat --init-reg $featdir/surfreg/flirt_init.dat \
-    --t2 2>&1 1>/dev/null | tee -a $log
+    --t2 --fslregout $featdir/surfreg/register.mat 2>&1 1>/dev/null | tee -a $log
   command_check "surface registration"
   # Pull back white surface to functional space for QA.
   for hemi in lh rh; do
@@ -530,64 +540,98 @@ fi
 (( $stpstage == 2 )) && cleanup
 
 ## STAGE 3
-## FIX denoising
+## ICA denoising
 # TODO: Need to sort out if we want to use Fix or Aroma going forward.
 # Fix heavily depends on good training data, to limited apparent benefit...
 # TODO: What is the output file of the artifact removal step? is filtered_func
 # modified in place?
-if (( $ststage <= 3 )) && [[ -n $dofix ]] ; then
-  echo "(id=$id) Performing FIX denoising..." | tee -a $log
-  # MELODIC ICA
-  if [[ -n $dofixi ]]; then
-    echo "(id=$id) MELODIC ICA..." | tee -a $log
-    melodic -i $func -o $featdir/filtered_func_data.ica \
-      --report 2>&1 1>/dev/null | tee -a $log
-    command_check "MELODIC ICA"
+if (( $ststage <= 3 )) && [[ -n $doaroma || -n $dofix ]] ; then
+  echo "(id=$id) Performing ICA denoising..." | tee -a $log
+  # First save a copy of the pre-filtered data (if it doesn't already exist).
+  noisyfunc=$featdir/filtered_func_data_noisy.nii.gz
+  if [[ ! -f $noisyfunc ]]; then
+    cp $func $noisyfunc
   fi
+  
+  # AROMA ICA denoising
+  if [[ -n $doaroma ]]; then
+    echo "(id=$id) ICA AROMA..." | tee -a $log
+    warp=$SUBJECTS_DIR/$subj/mri/T1.anat/T1_to_MNI_nonlin_coeff.nii.gz
+    affmat=$featdir/surfreg/register.mat
+    ica-aroma -i $input -o $featdir/ica_aroma -a $affmat -w $warp -log $featdir/ica_aroma.log
+    command_check "ica-aroma"
 
-  # Feature extraction
-  if [[ -n $dofixf ]]; then
-    echo "(id=$id) FIX feature extraction..." | tee -a $log
-    # Prepping anatomical files
-    mkdir $featdir/reg 2>/dev/null
-    mri_convert $subjdir/mri/brainmask.mgz \
-      $featdir/reg/highres.nii.gz 2>&1 1>/dev/null | tee -a $log
-    command_check "high res anatomical conversion"
-    mri_matrix_multiply -iim $featdir/surfreg/register.dat \
-      -om $featdir/reg/highres2example_func.dat 2>&1 1>/dev/null | tee -a $log
-    command_check "anatomical registration inversion"
-    tkregister2 --mov $featdir/reg/highres.nii.gz \
-      --targ $featdir/example_func.nii.gz \
-      --reg $featdir/reg/highres2example_func.dat \
-      --fslregout $featdir/reg/highres2example_func.mat \
-      --noedit 2>&1 1>/dev/null | tee -a $log
-    command_check "anatomical registration conversion to FSL format"
-    cp $featdir/example_func.nii.gz $featdir/reg/example_func.nii.gz
-    # FIX feature extraction
-    fix -f $featdir 2>&1 1>/dev/null | tee -a $log
-    command_check "FIX feature extraction"
+    # Filter out components.
+    components=$(cat $featdir/ica_aroma/classified_motion_ICs.txt)
+    fsl_regfilt -i $func -d $featdir/ica_aroma/melodic.ica/melodic_mix \
+      -f $components -o $func -m $featdir/mask.nii.gz 2>&1 1>/dev/null | tee -a $log
+    command_check "ica-aroma filtering"
   fi
+  
+  # FIX ICA denoising
+  if [[ -n $dofix ]]; then 
+    if [[ -n $dofixi ]]; then
+      echo "(id=$id) FIX MELODIC ICA..." | tee -a $log
+      melodic -i $func -o $featdir/filtered_func_data.ica \
+        --report 2>&1 1>/dev/null | tee -a $log
+      command_check "MELODIC ICA"
+    fi
 
-  # FIX classification
-  if [[ -n $dofixc ]]; then
-    echo "(id=$id) FIX classification..." | tee -a $log
-    fix -c $featdir $fixW $fixT 2>&1 1>/dev/null | tee -a $log
-    command_check "FIX classification"
-  fi
+    # Feature extraction
+    if [[ -n $dofixf ]]; then
+      echo "(id=$id) FIX feature extraction..." | tee -a $log
+      # Prepping anatomical files
+      mkdir $featdir/reg 2>/dev/null
+      mri_convert $subjdir/mri/brainmask.mgz \
+        $featdir/reg/highres.nii.gz 2>&1 1>/dev/null | tee -a $log
+      command_check "high res anatomical conversion"
+      mri_matrix_multiply -iim $featdir/surfreg/register.dat \
+        -om $featdir/reg/highres2example_func.dat 2>&1 1>/dev/null | tee -a $log
+      command_check "anatomical registration inversion"
+      tkregister2 --mov $featdir/reg/highres.nii.gz \
+        --targ $featdir/example_func.nii.gz \
+        --reg $featdir/reg/highres2example_func.dat \
+        --fslregout $featdir/reg/highres2example_func.mat \
+        --noedit 2>&1 1>/dev/null | tee -a $log
+      command_check "anatomical registration conversion to FSL format"
+      cp $featdir/example_func.nii.gz $featdir/reg/example_func.nii.gz
+      # FIX feature extraction
+      fix -f $featdir 2>&1 1>/dev/null | tee -a $log
+      command_check "FIX feature extraction"
+    fi
 
-  # FIX removal of artifactual components
-  if [[ -n $dofixr ]]; then
-    echo "(id=$id) FIX artifact removal..." | tee -a $log
-    fixWname=`basename ${fixW%.RData}`
-    fix -a $featdir/fix4melview_${fixWname}_thr${fixT}.txt 2>&1 1>/dev/null | tee -a $log
-    command_check "FIX noise removal"
+    # FIX classification
+    if [[ -n $dofixc ]]; then
+      echo "(id=$id) FIX classification..." | tee -a $log
+      fix -c $featdir $fixW $fixT 2>&1 1>/dev/null | tee -a $log
+      command_check "FIX classification"
+    fi
+
+    # FIX removal of artifactual components
+    if [[ -n $dofixr ]]; then
+      echo "(id=$id) FIX artifact removal..." | tee -a $log
+      fixWname=`basename ${fixW%.RData}`
+      fix -a $featdir/fix4melview_${fixWname}_thr${fixT}.txt 2>&1 1>/dev/null | tee -a $log
+      command_check "FIX noise removal"
+      mv $featdir/filtered_func_data_clean.nii.gz $func
+    fi
   fi
 fi
 (( $stpstage == 3 )) && cleanup
 
 ## STAGE 4
-## Nuisance regression
+## High-pass filtering
 if (( $ststage <= 4 )); then
+  echo "(id=$id) High-pass filtering..." | tee -a $log
+  sigma=$(echo "$hpf/(2.0 * $tr)" | bc -l)
+  fslmaths $func -bptf $sigma -1 $func 2>&1 1>/dev/null | tee -a $log
+  command_check "high-pass filtering"
+fi
+(( $stpstage == 4 )) && cleanup
+
+## STAGE 5
+## Nuisance regression
+if (( $ststage <= 5 )); then
   echo "(id=$id) Computing average gm, wm & csf signal..." | tee -a $log
   mkdir $featdir/art 2>/dev/null
   # resampling aseg to functional space. using nearest interpolation so as not to mix up labels
@@ -625,6 +669,12 @@ if (( $ststage <= 4 )); then
   # Regress out nuisance covariates if asked for.
   if [[ -n $nuis_reg ]]; then
     echo "(id=$id) Regressing nuisance covarariates $nuis_reg..." | tee -a $log
+    # First save a copy of the pre-filtered data (if it doesn't already exist).
+    noisyfunc=$featdir/filtered_func_data_noisy.nii.gz
+    if [[ ! -f $noisyfunc ]]; then
+      cp $func $noisyfunc
+    fi
+
     nuis_dm=$featdir/art/nuisance.dm.txt
     rm $nuis_dm 2>/dev/null # Important if restarting
     for cov in $nuis_reg; do
@@ -636,11 +686,11 @@ if (( $ststage <= 4 )); then
     command_check "Nuisance regression"
   fi
 fi
-(( $stpstage == 4 )) && cleanup
+(( $stpstage == 5 )) && cleanup
 
-## STAGE 5
+## STAGE 6 
 ## Artifact detection
-if (( $ststage <= 5 )); then
+if (( $ststage <= 6 )); then
   mkdir $featdir/art 2>/dev/null
   echo "(id=$id) Checking for motion spikes (fdrms metric)..." | tee -a $log
   # important if re-starting
@@ -735,16 +785,12 @@ if (( $ststage <= 5 )); then
   make_data_gif $input $featdir/raw_func.gif
   make_data_gif $func $featdir/filtered_func.gif
 fi
-(( $stpstage == 5 )) && cleanup
+(( $stpstage == 6 )) && cleanup
 
-## STAGE 6
+## STAGE 7 
 ## Surface mapping, dilating, smoothing
-if (( $ststage <= 6 )); then
+if (( $ststage <= 7 )); then
   echo "(id=$id) Mapping data to the surface..." | tee -a $log
-  # map clean data to surface if it exists
-  if [[ -f $featdir/filtered_func_data_clean.nii.gz ]]; then
-    func=$featdir/filtered_func_data_clean.nii.gz
-  fi
   # editing vox2ras matrix so that surface mapping works
   mri_vol2vol --mov $func --targ $subjdir/mri/brainmask.mgz \
     --o $tmpdir/anat_func.nii.gz --no-resample \

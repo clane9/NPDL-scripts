@@ -1,0 +1,135 @@
+#!/bin/bash
+
+err () {
+  if [[ -n $log ]]; then
+    echo "ERROR: $1" >> $log
+  else
+    echo "ERROR: $1" > &2
+  fi
+  cleanup 1
+}
+
+cleanup () {
+  if [[ -d $tmpdir ]]; then
+    rm -r $tmpdir
+  fi
+  exit $1
+}
+
+command_check () {
+  # checks if last command failed. args are $? and command name
+  # PIPESTATUS is used in case last command is piped to tee or something.
+  if [[ ${PIPESTATUS[0]} != 0 ]]; then
+    err "$1 failed"
+  fi
+}
+
+if [[ $# == 0 || $1 == -h || $1 == --help ]]; then
+  echo "Usage: ica-aroma -i <raw-func> -o <outdir> -a <affmat> -w <warp> -log <log>"
+  echo
+  echo "Carry out ICA-AROMA pipeline, starting from raw data. Using this wrapper"
+  echo "ensures that the correct preprocessing steps are performed."
+  echo
+  exit
+fi
+
+input=
+outdir=
+affmat=
+warp=
+log=
+tmpdir=
+
+if [[ ! -d $AROMA_DIR ]]; then
+  err "ICA-AROMA not installed or AROMA_DIR not set."
+fi
+
+while [[ $1 == -* ]]; do
+  case $1 in
+    -i)
+      input=$2
+      shift
+      shift
+      ;;
+    -o)
+      outdir=$2
+      shift
+      shift
+      ;;
+    -a)
+      affmat=$2
+      shift
+      shift
+      ;;
+    -w)
+      warp=$2
+      shift
+      shift
+      ;;
+    -log)
+      log=$2
+      shift
+      shift
+      ;;
+    *)
+      err "Unrecognized flag $1."
+      ;;
+  esac
+done
+
+# Superficially check inputs.
+varnames=( input outdir affmat warp log )
+vars=( $input $outdir $affmat $warp $log )
+for i in {0..4}; do
+  if [[ -z ${vars[i]} ]]; then
+    err "${varnames[i]} argument not provided."
+  fi
+  if [[ ${vars[i]} != outdir && ${vars[i]} != log && ! -f ${vars[i]} ]]; then
+    err "${varnames[i]} does not exist."
+  fi
+done
+
+tmpdir=$(mktemp -d /tmp/ica-aroma-XXX)
+rm $log 2>/dev/null
+
+# Run preprocessing.
+nvols=$(fslnvols $input)
+if (( $nvols <= 1 )); then
+  err "Input $input is not a 4d nifti file."
+fi
+
+# feat preparation
+# fsf must contain absolute paths
+fsf=$tmpdir/design.fsf
+featdir=$tmpdir/aroma
+
+cp $PRPRC_TEMP $fsf
+sed -i 's@\(set feat_files(1)\)\(.*\)@\1 "'$(readlink -m $input)'"@' $fsf
+sed -i 's@\(set fmri(outputdir)\)\(.*\)@\1 "'$(readlink -m $featdir)'"@' $fsf
+tr=$(fslinfo $input | grep "^pixdim4" | sed 's@pixdim4\s*@@')
+sed -i 's@\(set fmri(tr)\)\(.*\)@\1 '$tr'@' $fsf
+sed -i 's@\(set fmri(npts)\)\(.*\)@\1 '$nvols'@' $fsf
+sed -i 's@\(set fmri(temphp_yn)\)\(.*\)@\1 '0'@' $fsf
+sed -i 's@\(set fmri(smooth)\)\(.*\)@\1 '6.0'@' $fsf
+
+# Run FEAT preprocessing.
+echo "Running feat..." >> $log
+feat $fsf >> $log 2>&1 
+command_check "feat preprocessing"
+featdir=${featdir}.feat
+func=$featdir/filtered_func_data.nii.gz
+mcf=$featdir/mc/prefiltered_func_data_mcf.par
+
+# Make custom mask.
+echo "Running bet..." >> $log
+bet $featdir/example_func.nii.gz $tmpdir/bet -f 0.3 -n -m -R >> $log 2>&1
+command_check "bet"
+mask=$tmpdir/bet_mask.nii.gz
+
+# Run ICA-AROMA.
+echo "Running AROMA..." >> $log
+python ${AROMA_DIR}/ICA_AROMA.py -i $func -o $outdir -a $affmat -w $warp \
+  -mc $mcf -m $mask -den no >> $log 2>&1
+command_check "ICA_AROMA.py"
+
+cleanup 0
