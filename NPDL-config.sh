@@ -84,7 +84,3 @@ fi
 if [[ -z $PF_SERVER_ADDR || -z $PF_PORT || -z $PF_LAB_DIR ]]; then
   echo "WARNING: parfetch environment variables not configured." >&2
 fi
-
-if [[ ! -d $FIX_DIR || ! -f $FIX_RDATA ]]; then
-  echo "WARNING: FSL-Fix not configured." >&2
-fi

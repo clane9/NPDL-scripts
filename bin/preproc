@@ -616,11 +616,11 @@ if (( $ststage <= 3 )); then
     command_check "anatomical registration conversion to FSL format"
     cp $featdir/example_func.nii.gz $featdir/reg/example_func.nii.gz
     # FIX feature extraction
-    fix -f $featdir 2>&1 1>/dev/null | tee -a $log
+    ./${FIX_DIR}/fix -f $featdir 2>&1 1>/dev/null | tee -a $log
     command_check "FIX feature extraction"
     
     echo "(id=$id) FIX classification..." | tee -a $log
-    fix -c $featdir $fixW $fixT 2>&1 1>/dev/null | tee -a $log
+    ./${FIX_DIR}/fix -c $featdir $fixW $fixT 2>&1 1>/dev/null | tee -a $log
     command_check "FIX classification"
   fi
 fi
@@ -639,7 +639,7 @@ if (( $ststage <= 4 )); then
   if [[ -n $dofixr ]]; then 
     echo "(id=$id) FIX artifact removal..." | tee -a $log
     fixWname=`basename ${fixW%.RData}`
-    fix -a $featdir/fix4melview_${fixWname}_thr${fixT}.txt 2>&1 1>/dev/null | tee -a $log
+    ./${FIX_DIR}/fix -a $featdir/fix4melview_${fixWname}_thr${fixT}.txt 2>&1 1>/dev/null | tee -a $log
     command_check "FIX noise removal"
   fi
   
