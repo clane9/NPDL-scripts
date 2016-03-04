@@ -1,0 +1,175 @@
+<html>
+  
+<head>
+
+<style>
+body {{
+  font-family: "Arial", sans-serif;
+}}
+
+figure, img {{
+  display: block;
+  margin: auto;
+}}
+
+img {{
+  width: 100%;
+}}
+</style>
+
+</head>
+
+<body>
+
+  <h2>Preprocessing QA Report</h2>
+  <table>
+    <tr>
+      <td><b>Subject</b>:</td>
+      <td>{subject:s}</td>
+    </tr>
+    <tr>
+      <td><b>Run:</b></td>
+      <td>{run_name:s}</td>
+    </tr>
+  </table>
+
+  <hr>
+  <h3>Summary</h3>
+  <hr>
+  
+  <p>
+  <b>Command line:</b><br>
+  <code>{command:s}</code>
+  </p>
+
+  <figure>
+    <img src="{raw_gif:s}" alt="Raw data gif">
+    <figcaption>Raw functional data animation.</figcaption>
+  </figure>
+
+  <figure>
+    <img src="{clean_gif:s}" alt="Preprocessed data gif">
+    <figcaption>Preprocessed functional data animation.</figcaption>
+  </figure>
+  
+  <hr>
+  <h3>Global signal</h3>
+  <hr>
+
+  <figure>
+    <img src="{temp_sd:s}" alt="Temporal SD">
+    <figcaption>Temporal standard deviation (after motion correction
+    only).</figcaption>
+  </figure>
+
+  <figure>
+    <img src="{temp_snr:s}" alt="Temporal SNR">
+    <figcaption>Temporal signal-to-noise ratio (after motion correction only;
+    SNR=mean/sd).</figcaption>
+  </figure>
+  
+  <figure>
+    <img src="{global_sig:s}" alt="Global signal">
+    <figcaption>Global signal (after motion correction only).</figcaption>
+  </figure>
+
+  <figure>
+    <img src="{global_sig_by_tissue:s}" alt="Global signal by tissue">
+    <figcaption>Global signal separated by tissue type, and normalized (after
+    motion correction only).</figcaption>
+  </figure>
+
+  <table border="1">
+    <caption>Gray matter/White matter signal statistics.</caption>
+    <tr>
+      <th>GM SD</th>
+      <th>WM SD</th>
+      <th>GM vs WM R<sup>2</sup></th>
+      <th>GM/WM SNR</th>
+    </tr>
+    <tr>
+      <td>{gm_sd:0.2f}</td>
+      <td>{wm_sd:0.2f}</td>
+      <td>{gm_wm_rsqrd:0.3f}</td>
+      <td>{gm_wm_snr:0.3f}</td>
+    </tr>
+  </table>
+  
+  <hr>
+  <h3>Motion</h3>
+  <hr>
+
+  <figure>
+    <img src="{mot_trans_params:s}" alt="MC trans parameters">
+    <img src="{mot_rot_params:s}" alt="MC rot parameters">
+    <figcaption>Motion correction parameters.</figcaption>
+  </figure>
+
+  <figure>
+    <img src="{fdrms:s}" alt="FDRMS">
+    <img src="{dvars:s}" alt="DVARS">
+    <figcaption>Motion statistics.</figcaption>
+  </figure>
+
+  <table border="1">
+    <caption>FDRMS statistics.</caption>
+    <tr>
+      <th>Mean</th>
+      <th>95%</th>
+      <th>#&gt;0.2</th>
+      <th>#&gt;0.5</th>
+      <th>#&gt;1.0</th>
+      <th>#&gt;1.5</th>
+      <th>#&gt;2.0</th>
+    </tr>
+    <tr>
+      <td>{mean_fd:0.2f}</td>
+      <td>{95th_fd:0.2f}</td>
+      <td>{gt_02_fd:d}</td>
+      <td>{gt_05_fd:d}</td>
+      <td>{gt_10_fd:d}</td>
+      <td>{gt_15_fd:d}</td>
+      <td>{gt_20_fd:d}</td>
+    </tr>
+  </table>
+
+  <hr>
+  <h3>Surface mapping</h3>
+  <hr>
+
+  <figure>
+    <img src="{surf_outline:s}" alt="Surface outline">
+    <figcaption>Surface outline in native functional space.</figcaption>
+  </figure>
+
+  <table border="1">
+    <caption>Surface coverage.</caption>
+    <tr>
+      <th colspan="2">% Frontal</th>
+      <th colspan="2">% Occipital</th>
+      <th colspan="2">% Temporal</th>
+      <th colspan="2">% Parietal</th>
+    </tr>
+    <tr>
+      <th>LH</th>
+      <th>RH</th>
+      <th>LH</th>
+      <th>RH</th>
+      <th>LH</th>
+      <th>RH</th>
+      <th>LH</th>
+      <th>RH</th>
+    <tr>
+      <td>{cover_lh_front:0.1f}</td>
+      <td>{cover_rh_front:0.1f}</td>
+      <td>{cover_lh_occ:0.1f}</td>
+      <td>{cover_rh_occ:0.1f}</td>
+      <td>{cover_lh_temp:0.1f}</td>
+      <td>{cover_rh_temp:0.1f}</td>
+      <td>{cover_lh_pariet:0.1f}</td>
+      <td>{cover_rh_pariet:0.1f}</td>
+    </tr>
+  </table>
+  
+</body>
+</html>

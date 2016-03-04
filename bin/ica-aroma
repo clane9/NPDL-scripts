@@ -4,7 +4,7 @@ err () {
   if [[ -n $log ]]; then
     echo "ERROR: $1" >> $log
   else
-    echo "ERROR: $1" > &2
+    echo "ERROR: $1" >&2
   fi
   cleanup 1
 }
@@ -84,7 +84,7 @@ for i in {0..4}; do
   if [[ -z ${vars[i]} ]]; then
     err "${varnames[i]} argument not provided."
   fi
-  if [[ ${vars[i]} != outdir && ${vars[i]} != log && ! -f ${vars[i]} ]]; then
+  if [[ ${varnames[i]} != outdir && ${varnames[i]} != log && ! -f ${vars[i]} ]]; then
     err "${varnames[i]} does not exist."
   fi
 done
@@ -128,6 +128,11 @@ mask=$tmpdir/bet_mask.nii.gz
 
 # Run ICA-AROMA.
 echo "Running AROMA..." >> $log
+# Make paths absolute
+affmat=$(readlink -m $affmat)
+warp=$(readlink -m $warp)
+outdir=$(readlink -m $outdir)
+
 python ${AROMA_DIR}/ICA_AROMA.py -i $func -o $outdir -a $affmat -w $warp \
   -mc $mcf -m $mask -den no >> $log 2>&1
 command_check "ICA_AROMA.py"
