@@ -297,9 +297,6 @@ while [[ $1 == -* ]]; do
   esac
 done
 
-# Debug mode
-set -xv
-
 printf '%s\n%s\n' "Starting preproc job at $now (id=$id)." \
   "command line: $scriptname $args" | tee -a $log
 
@@ -455,8 +452,14 @@ fi
 # Check band-pass filtering options
 int_check $hpf
 int_check $lpf
+if (( $hpf == 0 )); then
+  err "high-pass filter cutoff can't be 0. Set to -1 to disable."
+fi
+if (( $lpf == 0 )); then
+  err "low-pass filter cutoff can't be 0. Set to -1 to disable."
+fi
 if (( $hpf <= $lpf )) && (( $hpf > 0 )); then
-  err "hpf can't be smaller than lpf."
+  err "high-pass cutoff period can't be smaller than low-pass cutoff."
 fi
 
 # Check nuisance regression option.
@@ -537,8 +540,7 @@ if (( $ststage <= 1 )); then
   ## Why do we have to do this again? If scaling also happens in feat?
   echo "(id=$id) Grand mean intensity scaling..." | tee -a $log
   globmean=`fslstats $func -k $featdir/mask.nii.gz -M`
-  scaler=`echo "10000/$globmean" | bc -l`
-  fslmaths $func -mul $scaler $func 2>&1 1>/dev/null | tee -a $log
+  fslmaths $func -div $globmean -mul 10000 $scaler $func 2>&1 1>/dev/null | tee -a $log
   fslmeants -i $func -o $featdir/mc/globsig.txt -m $featdir/mask.nii.gz
   fsl_tsplot -i $featdir/mc/globsig.txt -o $featdir/mc/globsig.png \
     -t "Global Signal (mean=10000)" 2>&1 1>/dev/null | tee -a $log
@@ -570,22 +572,27 @@ if (( $ststage <= 2 )); then
     --fslregout $featdir/surfreg/register.mat \
     --noedit 2>&1 1>/dev/null | tee -a $log
   command_check "registration conversion to FSL format."
-  # Pull back white surface to functional space for QA.
+  # Overlay surface on transformed functional for evaluating registration
   for hemi in lh rh; do
     mri_surf2vol --mkmask --hemi $hemi --projfrac 0.5 \
-      --reg $featdir/surfreg/register.dat \
-      --template $featdir/example_func.nii.gz \
+      --identity $subj \
+      --template $subjdir/mri/orig.mgz \
       --o $tmpdir/surf_outline.$hemi.nii.gz 2>&1 1>/dev/null | tee -a $log
-    command_check "pull back surface to func space ($hemi)"
+    command_check "make surface outline mask ($hemi)"
   done
   fslmaths $tmpdir/surf_outline.lh.nii.gz -max $tmpdir/surf_outline.rh.nii.gz \
-    $featdir/surfreg/surf_outline.nii.gz
+    $tmpdir/surf_outline.nii.gz
+  mri_vol2vol --mov $featdir/example_func.nii.gz \
+    --targ $subjdir/mri/orig.mgz --reg $featdir/surfreg/register.dat \
+    --o $tmpdir/anat_example_func.nii.gz 2>&1 1>/dev/null | tee -a $log
   # Save images of overlaid surface outline
-  overlay 1 1 $featdir/example_func.nii.gz -a \
-    $featdir/surfreg/surf_outline.nii.gz 0.99 1.01 \
-    $featdir/surfreg/surf_outline_overlay.nii.gz 2>&1 1>/dev/null | tee -a $log
-  slicer $featdir/surfreg/surf_outline_overlay.nii.gz -S 2 720 \
-    $featdir/surfreg/surf_outline.png
+  overlay 1 1 $tmpdir/anat_example_func.nii.gz -a \
+    $tmpdir/surf_outline.nii.gz 0.99 1.01 \
+    $tmpdir/surf_outline_overlay.nii.gz 2>&1 1>/dev/null | tee -a $log
+  # Freesurfer files are oriented weird for slicer.
+  fslreorient2std $tmpdir/surf_outline_overlay.nii.gz \
+    $tmpdir/surf_outline_overlay.nii.gz 2>&1 1>/dev/null | tee -a $log
+  slicer $tmpdir/surf_outline_overlay.nii.gz -a $featdir/surfreg/surf_outline.png
   command_check "saving surface outline image"
 fi
 (( $stpstage == 2 )) && cleanup
@@ -597,7 +604,8 @@ if (( $ststage <= 3 )); then
     echo "(id=$id) ICA AROMA..." | tee -a $log
     warp=$SUBJECTS_DIR/$subj/mri/T1.anat/T1_to_MNI_nonlin_coeff.nii.gz
     affmat=$featdir/surfreg/register.mat
-    ica-aroma -i $input -o $featdir/ica_aroma -a $affmat -w $warp -log $featdir/ica_aroma.log
+    bash $NPDL_SCRIPT_DIR/lib/ica-aroma -i $input -o $featdir/ica_aroma \
+      -a $affmat -w $warp -log $featdir/ica_aroma.log
     command_check "ica-aroma"
   fi
 
@@ -842,11 +850,11 @@ fi
 if (( $ststage <= 6 )); then
   echo "(id=$id) Mapping data to the surface..." | tee -a $log
   # editing vox2ras matrix so that surface mapping works
-  mri_vol2vol --mov $cleanfunc --targ $subjdir/mri/brainmask.mgz \
+  mri_vol2vol --mov $cleanfunc --targ $subjdir/mri/orig.mgz \
     --o $tmpdir/anat_func.nii.gz --no-resample \
     --reg $featdir/surfreg/register.dat 2>&1 1>/dev/null | tee -a $log
   command_check "functional vox2ras editing."
-  mri_vol2vol --mov $featdir/mask.nii.gz --targ $subjdir/mri/brainmask.mgz \
+  mri_vol2vol --mov $featdir/mask.nii.gz --targ $subjdir/mri/orig.mgz \
     --o $tmpdir/anat_mask.nii.gz --no-resample \
     --reg $featdir/surfreg/register.dat 2>&1 1>/dev/null | tee -a $log
   command_check "mask vox2ras editing"
@@ -953,25 +961,6 @@ fi
 ## STAGE 7
 ## Generating QA report
 if (( $ststage <= 7 )); then
-  # Evaluating surface data coverage
-  echo "(id=$id) Evaluating surface coverage..." | tee -a $log
-  lobes="FRONTAL TEMPORAL OCCIPITAL PARIETAL"
-  lobedir=$downsampdir/label/PALS_B12_Lobes/masks
-  cover_report=$featdir/surf_coverage.csv
-  echo "Lobe,Hemi,Coverage" > $cover_report
-  for lobe in $lobes; do
-    for hemi in lh rh; do
-      lobe_mask=$lobedir/$hemi.LOBE.$lobe.shape.gii
-      data_mask=$featdir/$hemi.32k_fs_LR.mask.shape.gii
-      lobe_size=$(wb_command -metric-vertex-sum $lobe_mask)
-      command_check "$lobe $hemi coverage"
-      lobe_cover=$(wb_command -metric-vertex-sum $data_mask -roi $lobe_mask)
-      command_check "$lobe $hemi coverage"
-      lobe_cover=$(echo "($lobe_cover / $lobe_size)" | bc -l)
-      echo "$lobe,$hemi,$lobe_cover" >> $cover_report
-    done
-  done
-
   echo "(id=$id) Generating QA report..." | tee -a $log
   python $NPDL_SCRIPT_DIR/lib/make_preproc_QA_report.py $featdir
 fi

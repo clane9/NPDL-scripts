@@ -1,5 +1,5 @@
 <html>
-  
+
 <head>
 
 <style>
@@ -7,14 +7,26 @@ body {{
   font-family: "Arial", sans-serif;
 }}
 
-figure, img {{
+figure {{
   display: block;
-  margin: auto;
+  margin-left: auto;
+  margin-right: auto;
+  margin-top: 0.25in;
+  margin-bottom: 0.25in;
+  width: 100%;
 }}
 
 img {{
+  display: block;
+  margin: auto;
   width: 100%;
 }}
+
+table {{
+  margin-bottom: 0.25in;
+  width: 50%;
+}}
+
 </style>
 
 </head>
@@ -36,22 +48,18 @@ img {{
   <hr>
   <h3>Summary</h3>
   <hr>
-  
+
   <p>
   <b>Command line:</b><br>
   <code>{command:s}</code>
   </p>
 
   <figure>
-    <img src="{raw_gif:s}" alt="Raw data gif">
-    <figcaption>Raw functional data animation.</figcaption>
+    <img src="{raw_gif:s}" alt="Raw data gif" style="width:49.5%;display:inline;">
+    <img src="{clean_gif:s}" alt="Preprocessed data gif" style="width:49.5%;display:inline;">
+    <figcaption>Raw (left) and preprocessed (right) functional data animations.</figcaption>
   </figure>
 
-  <figure>
-    <img src="{clean_gif:s}" alt="Preprocessed data gif">
-    <figcaption>Preprocessed functional data animation.</figcaption>
-  </figure>
-  
   <hr>
   <h3>Global signal</h3>
   <hr>
@@ -67,7 +75,7 @@ img {{
     <figcaption>Temporal signal-to-noise ratio (after motion correction only;
     SNR=mean/sd).</figcaption>
   </figure>
-  
+
   <figure>
     <img src="{global_sig:s}" alt="Global signal">
     <figcaption>Global signal (after motion correction only).</figcaption>
@@ -94,7 +102,7 @@ img {{
       <td>{gm_wm_snr:0.3f}</td>
     </tr>
   </table>
-  
+
   <hr>
   <h3>Motion</h3>
   <hr>
@@ -139,16 +147,16 @@ img {{
 
   <figure>
     <img src="{surf_outline:s}" alt="Surface outline">
-    <figcaption>Surface outline in native functional space.</figcaption>
+    <figcaption>Surface outline overlaid on example func after resampling to anatomical space.</figcaption>
   </figure>
 
   <table border="1">
-    <caption>Surface coverage.</caption>
+    <caption>Surface coverage: missing surface area (mm<sup>2</sup>)</caption>
     <tr>
-      <th colspan="2">% Frontal</th>
-      <th colspan="2">% Occipital</th>
-      <th colspan="2">% Temporal</th>
-      <th colspan="2">% Parietal</th>
+      <th colspan="2">Frontal</th>
+      <th colspan="2">Temporal</th>
+      <th colspan="2">Parietal</th>
+      <th colspan="2">Occipital</th>
     </tr>
     <tr>
       <th>LH</th>
@@ -160,16 +168,16 @@ img {{
       <th>LH</th>
       <th>RH</th>
     <tr>
-      <td>{cover_lh_front:0.1f}</td>
-      <td>{cover_rh_front:0.1f}</td>
-      <td>{cover_lh_occ:0.1f}</td>
-      <td>{cover_rh_occ:0.1f}</td>
-      <td>{cover_lh_temp:0.1f}</td>
-      <td>{cover_rh_temp:0.1f}</td>
-      <td>{cover_lh_pariet:0.1f}</td>
-      <td>{cover_rh_pariet:0.1f}</td>
+      <td>{cover_lh_FRONTAL:0.1f}</td>
+      <td>{cover_rh_FRONTAL:0.1f}</td>
+      <td>{cover_lh_TEMPORAL:0.1f}</td>
+      <td>{cover_rh_TEMPORAL:0.1f}</td>
+      <td>{cover_lh_PARIETAL:0.1f}</td>
+      <td>{cover_rh_PARIETAL:0.1f}</td>
+      <td>{cover_lh_OCCIPITAL:0.1f}</td>
+      <td>{cover_rh_OCCIPITAL:0.1f}</td>
     </tr>
   </table>
-  
+
 </body>
 </html>
