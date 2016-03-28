@@ -1,13 +1,21 @@
 #!/usr/bin/env python
 
 """
-Usage: 
+Usage:
   psc_calc [options] --roi=<roi> --runs=<runs> --cond=<timing>... --out=<outdir>
   psc_calc [options] --roi=<roi> --runs=<runs> --events=<timing> --out=<outdir>
 
 Extract percent signal change from a set of functional runs within an ROI. PSC
-is extracted using A GLM with both finite impulse response (FIR) and FSL's
-optimal FLOBS basis set.
+is extracted using either a finite-impulse response (FIR) model, FSL's flexible
+HRF bases (FLOBS), or classic selective averaging.
+
+References:
+  Dale, A. M. (1999). Optimal experimental design for event-related fMRI. Human
+    brain mapping, 8(2-3), 109-114.
+
+  Ollinger, J. M., Shulman, G. L., & Corbetta, M. (2001). Separating processes
+    within a trial in event-related functional MRI: I. The method.
+    Neuroimage,13(1), 210-217.
 
 Example:
   psc_calc --roi=IFG.shape.gii --runs=\"yo_01.func.gii yo_02.func.gii:yo_02-cfd1.txt:yo_02-cfd2.txt\" --cond=\"A:yo_01-A.txt yo_02-A.txt\" --cond=\"B:yo_01-B.txt yo_02-B.txt\" --out=BLAH_01-IFG
@@ -21,10 +29,10 @@ Arguments:
                      confound text files per run. Each confound covariate should
                      correspond to a column in the confound text file, the same
                      length as the functional run. Confounds must be separated
-                     from runs (and eachother) using colons. Confounds should
-                     only be used to model out specific time points, and should
-                     consist of only 1s and 0s.
-  --cond=<timing>    List of timing files for a given condition, delimited by 
+                     from runs (and eachother) using colons. Confounds can be
+                     discrete (e.g. a spike regressor) or continuous.
+                     Continuous confounds will be centered.
+  --cond=<timing>    List of timing files for a given condition, delimited by
                      spaces and enclosed in quotes. The condition label must
                      precede the list, and be followed by a colon. There must
                      be a timing file for each run given, and the two lists
@@ -32,7 +40,7 @@ Arguments:
                      argument; you should give a --cond argument for each
                      condition that you'd like to model. Timing files should be
                      in FSL's 3-column format.
-  --events=<events>  List of combined timing files, one per run. The list should 
+  --events=<events>  List of combined timing files, one per run. The list should
                      be delimited by spaces and enclosed in quotes. The first
                      column of each file should be the condition label,
                      followed by onset, duration, and height as in FSL's
@@ -42,17 +50,25 @@ Arguments:
                      overwritten if it does.
 
 Options:
-  --X=<conds>        List of conditions to ignore. These conditions will be 
-                     modeled but not reported. List should be delimited by
-                     spaces and enclosed in double quotes (E.g. --X=\"A B C\").
-  --resp=<conds>     List of conditions modeling behavioral responses. These 
-                     conditions follow too closely to conditions of interest
-                     to be easily disentangled. They will be modeled only in
-                     the FLOBS basis function analysis (E.g. --resp=\"R\").
+  --mode=<mode>      Method for extracting PSC. Options are \"fir\", \"hrf\",
+                     \"classic\", or combinations thereof. List should be
+                     delimited by spaces and enclosed in double quotes (E.g.
+                     --mode=\"fir hrf classic\") [default: fir].
+  --X=<conds>        List of conditions to ignore. These conditions will be
+                     modeled but not reported.  (E.g. --X=\"A B C\").
   --lag=<secs>       How long after the offset of a stimulus should the PSC
-                     timecourse continue [default: 14].
+                     timecourse continue [default: 14.0].
+  --peakw=<secs>     Width of the peak averaging window in seconds. The peak
+                     window will be placed around the predicted peak time,
+                     which is based on the shape of the canonical HRF.
+                     Alternatively, you can specify two numbers to manually
+                     define the onset and offset of the peak window (E.g.
+                     --peakw=\"6.0 12.0\" [default: 6.0].
+  --bl=<opts>        Baseline start, relative to stimulus offset, and baseline
+                     stop, relative to stimulus onset, both in seconds. Only
+                     relevant in \"classic\" mode [default: 14.0 0.0].
   --tr=<secs>        TR in seconds [default: 2.0].
-  --no-figs          Don't make figures, since they're time-consuming. 
+  --no-figs          Don't make figures, since they can be time-consuming.
   --log=<file>       Log file. Otherwise log information will be sent to
                      stdout/stderr.
   -h, --help         View this message.
@@ -71,71 +87,76 @@ from nibabel import gifti
 import numpy as np
 import os
 import re
-from shutil import copy, rmtree
-import subprocess as subp
+from scipy.linalg import block_diag
 import sys
-import tempfile as tf
 
-log_file = None
-log_dup = None
+from npdl_utils import Logger, NPDLError, img_read, read_table, init_table, normalize, resample, plot_hrf, fit_glm
+
+logger = Logger(global_log=None, local_log=None, pid=os.getpid())
 plt = None
-PID = os.getpid()
 
 def main():
-  """
-  Main function
-  """
-  # Define some global variables
-  global log_file, outdir, log_dup, plt
+  """Main function"""
 
+  # Define some global variables
+  global logger, outdir, plt
+
+  # Load FSL's optimal HRF basis functions
   FLOBS = '{}/etc/default_flobs.flobs/hrfbasisfns.txt'.format(os.environ['FSLDIR'])
   try:
     FLOBS = np.genfromtxt(FLOBS)
   except IOError:
-    raise RoiError('No FLOBS found in FSL dir ({}).'.format(os.environ['FSLDIR']))
+    raise NPDLError('No FLOBS found in FSL dir ({}).'.format(os.environ['FSLDIR']))
 
   # ----------------------------------------------------------------------------
   # Read command line and check argument formats
   # ----------------------------------------------------------------------------
 
   # Read log option first, since it matters now
-  if ARGS['--log'] is not None:
-    if os.path.exists(os.path.dirname(os.path.abspath(ARGS['--log']))):
-      log_file = open(ARGS['--log'], 'a')
+  global_log = ARGS['--log']
+  if global_log is not None:
+    logdir = os.path.dirname(os.path.abspath(global_log))
+    if os.path.exists(logdir):
+      logger.set_global_log(open(global_log, 'a'))
     else:
-      warning('Log file directory does not exist. Using stdout/stderr.')
+      logger.warning('Log file directory ({}) does not exist.'.format(logdir))
 
-  # ROI 
+  # ROI
   roi = ARGS['--roi']
-  
+
   # Funtionals and confounds
   funcs = ARGS['--runs']
   # Check for a likely format error
   if re.search(r'( :|: )', funcs) is not None:
-    raise RoiError('--runs argument has bad format.')
+    raise NPDLError('--runs argument has bad format.')
   funcs = funcs.strip().split()
   funcs = [func.split(':') for func in funcs]
   # Sneaky way to unzip--thanks stack overflow
   funcs, func_cfds = zip(*[(func[0], func[1:]) for func in funcs])
   if len(funcs) == 0:
-    raise RoiError('No functional runs provided')
+    raise NPDLError('No functional runs provided')
   num_runs = len(funcs)
 
   # Timing files
-  if ARGS['--cond'] != []: 
+  if ARGS['--cond'] != []:
     tim_format=1
     tims = ARGS['--cond']
     tims = [re.split(r'\s*:?\s*', tim) for tim in tims]
     tims = {tim[0]: tim[1:] for tim in tims}
     for cond in tims:
       if len(tims[cond]) != num_runs:
-        raise RoiError(('Number of timing files for condition {} ({}) ' +
-                       'different from number ' +
-                       'of runs ({}).').format(cond, len(tims[cond]), num_runs))
+        raise NPDLError(('Number of timing files for condition {} ({}) ' +
+                         'different from number ' +
+                         'of runs ({}).').format(cond, len(tims[cond]), num_runs))
   else:
     tim_format=2
     tims = ARGS['--events']
     tims = tims.strip().split()
+
+  # Extraction mode
+  mode = set(ARGS['--mode'].split())
+  if not (mode <= {'fir', 'hrf', 'classic'}):
+    raise NPDLError('Invalid mode argument: {}.'.format(ARGS['--mode']))
 
   # Exclude conditons
   Xconds = ARGS['--X']
@@ -143,636 +164,730 @@ def main():
     Xconds = Xconds.strip().split()
   else:
     Xconds = []
-  
-  # resp conditons
-  resp = ARGS['--resp']
-  if resp is not None:
-    resp = resp.strip().split()
-  else:
-    resp = []
-  
+
   # TR
-  tr = ARGS['--tr']
-  try:
-    tr = float(tr)
-  except ValueError:
-    raise RoiError('--tr option ({}) has bad format.'.format(tr))
-  if tr < 0:
-    raise RoiError('--tr option ({}) cannot be negative.'.format(tr))
-  
+  tr = dur_check(ARGS['--tr'], '--tr')
+
   # PSC lag
-  lag = ARGS['--lag']
-  try:
-    lag = float(lag)
-  except ValueError:
-    raise RoiError('--lag option ({}) has bad format.'.format(lag))
-  if lag < 0:
-    raise RoiError('--lag option ({}) cannot be negative.'.format(lag))
+  lag = dur_check(ARGS['--lag'], '--lag')
   # Round lag to nearest tr
   lag = int(np.round(lag/tr))
+
+  # peak window
+  peakw = ARGS['--peakw'].strip().split()
+  if len(peakw) == 1:
+    peakw = dur_check(peakw[0], '--peakw')
+    man_peakw = False
+  elif len(peakw) == 2:
+    peakw = [dur_check(peakw[i], '--peakw') for i in 0, 1]
+    man_peakw = True
+  else:
+    raise NPDLError('Bad --peakw format.')
+
+  # Baseline options
+  bl_opts = ARGS['--bl'].split()
+  bl_opts = [dur_check(bl[i], '--bl', nonneg=False) for i in 0, 1]
+  default_bl = [14.0, 0.0]
+  if 'classic' not in mode and bl_opts != default_bl:
+    logger.warning(('Baseline parameters only apply in "classic" mode. ' +
+                    'Ignoring user options.'))
 
   # Make figures or not
   make_figs = not ARGS['--no-figs']
   if make_figs:
     # Importing pyplot can be time-consuming, so only do it if you have to
     # set Agg backend so that making figures doesn't depend on an X11 server
-    # http://matplotlib.org/faq/howto_faq.html#matplotlib-in-a-web-application-server 
+    # http://matplotlib.org/faq/howto_faq.html#matplotlib-in-a-web-application-server
     import matplotlib as mpl
     mpl.use('Agg')
     from matplotlib import pyplot as plt
-  
+
   # Output dir
   outdir = ARGS['--out']
   above_outdir = os.path.dirname(os.path.abspath(outdir))
   if not os.path.isdir(above_outdir):
-    raise RoiError(('Directory above output ({}) ' +
+    raise NPDLError(('Directory above output ({}) ' +
                    'does not exist.').format(above_outdir))
   if os.path.isdir(outdir):
-    warning('Output directory ({}) already exists. Overwriting.'.format(outdir))
+    logger.warning('Output directory ({}) already exists. Overwriting.'.format(outdir))
   else:
     os.makedirs(outdir)
-  log_dup = open('{}/log.txt'.format(outdir), 'w')
+  logger.set_local_log(open('{}/log.txt'.format(outdir), 'w'))
 
   # save command line and start time to log
   start_time = dt.now()
   start_time_s = start_time.strftime('%y-%m-%d %H:%M')
-  log(('psc_calc job started at {}.\n' + 
+  logger.log(('psc_calc job started at {}.\n' +
       'Command line:\n    psc_calc {}').format(start_time_s, ' '.join(sys.argv[1:])))
 
   # ----------------------------------------------------------------------------
   # Preprocess functional data
   # ----------------------------------------------------------------------------
-  
-  log('Loading and preprocessing functional data.')
+
+  logger.log('Loading and preprocessing functional data.')
+
   # Read images as time x vertices/voxels Numpy arrays
   roi = img_read(roi)
   funcs = [img_read(func) for func in funcs]
+
   # Check that all images have same number of voxels/vertices
   if len(set([img.shape[1] for img in [roi] + funcs])) > 1:
-    raise RoiError('Images provided have different numbers of voxels/vertices.')
+    raise NPDLError('Images provided have different numbers of voxels/vertices.')
+
   # Check ROI format
   if roi.shape[0] > 1:
-    raise RoiError('ROI is a 4D image.')
+    raise NPDLError('ROI is a 4D image.')
   roi = roi[0, :]
   if set(np.unique(roi)) != {0, 1}:
-    warning('ROI is not a binary image. Binarizing.')
+    logger.warning('ROI is not a binary image. Binarizing by thresholding at 0.')
     roi = (roi > 0).astype(int)
+
   # Calculate mask of voxels containing data for each run
   # Voxels without data should be constant
+  logger.log('Removing voxels/vertices that have near constant time series.')
   data_masks = np.array([(np.var(func, axis=0) > np.finfo('f8').eps) for func in funcs])
   # Combine masks into one
   data_mask = np.product(data_masks, axis=0)
-  log('Removing voxels/vertices that have near constant time series.')
   # combine with ROI mask
   mask = roi * data_mask
-  log('{} voxels out of {} in ROI kept.'.format(np.sum(mask), np.sum(roi)))
+  logger.log('{} voxels out of {} in ROI kept.'.format(np.sum(mask), np.sum(roi)))
+
   # mask time series'
   funcs = [func[:, mask==1] for func in funcs]
+
   # scale each voxel's time series to mean 1000
   tmeans = [np.reshape(np.mean(func, axis=0), (1, -1)) for func in funcs]
   funcs = [func * (1000.0/tmean) for func, tmean in zip(funcs, tmeans)]
+
   # Compute average time series for each run, and reshape as column vectors
   run_TSs = [np.reshape(np.mean(func, axis=1), (-1, 1)) for func in funcs]
   run_lens = [ts.size for ts in run_TSs]
   TS = np.vstack(run_TSs)
+  # Save copy of time-series
+  np.savetxt('{}/roi_ts.txt'.format(outdir), TS)
+
   # release some memory
   del funcs, tmeans, run_TSs, roi, mask, data_mask, data_masks
-  
+
   # ----------------------------------------------------------------------------
-  # Read confound files as Time x # confounds arrays
+  # Read confound files as time X # confounds arrays
   # ----------------------------------------------------------------------------
-  
-  log('Reading confound files.')
-  func_cfds = [read_run_cfds(run_cfds, run_len) 
-               for run_cfds, run_len in zip(func_cfds, run_lens)]
+
+  logger.log('Reading confound files.')
+  func_cfds, spike_masks = zip(*[read_run_cfds(run_cfds, run_len)
+                                for run_cfds, run_len in zip(func_cfds, run_lens)])
+
   # Prepare confounds for linear regression
   # Arrange in block diagonal format
-  cfd_mat = np.zeros((np.sum(run_lens), np.sum([cfd.shape[1] for cfd in func_cfds])))
-  for i, run_cfd in enumerate(func_cfds):
-    if run_cfd.shape[1] == 0:
-      continue
-    w_idx = int(np.sum([cfd.shape[1] for cfd in func_cfds[:i]]))
-    l_idx = int(np.sum(run_lens[:i]))
-    cfd_mat[l_idx: l_idx+run_lens[i], w_idx: w_idx+run_cfd.shape[1]] = run_cfd
-  
+  cfd_mat = block_diag(*func_cfds)
+
+  # Concatenate spike masks
+  spike_mask = np.hstack(spike_masks)
+
   # ----------------------------------------------------------------------------
-  # Read timing files
+  # Read and check timing files
   # ----------------------------------------------------------------------------
-  
-  # Note: Height columns in timing files not used
-  
-  log('Reading timing files.')
+
+  logger.log('Reading and checking timing files.')
+
+  # Form event table, cols: Run, Cond, Onset, Duration, Height
   # Read timing files in first format
-  # Cols: Onset, Duration, Height
+  # One per cond, run; cols: Onset, Duration, Height
+  event_table = []
   if tim_format == 1:
-    tims = {cond: map(read_table, ctims) for cond, ctims in tims.iteritems()}
     conds = sorted(tims.keys())
-    events = dict()
     for cond in conds:
       for i in range(num_runs):
-        events[(i, cond)] = [l[:2] for l in tims[cond][i]]
+        tim = read_table(tims[cond][i])
+        for event in tim:
+          try:
+            event_table.append([i, cond] + map(float, event))
+          except ValueError:
+            raise NPDLError(('Timing files must contain only numbers in onset,' +
+                             'duration, height columns.'))
+
   # Read timing files in second format
-  # Cols: Cond, Onset, Duration, Height
+  # One per run; cols: Cond, Onset, Duration, Height
   else:
     tims = [read_table(tim) for tim in tims]
     conds = [tuple(sorted(set([l[0] for l in tim]))) for tim in tims]
     # Check if each timing file has same conditions
     if len(set(conds)) != 1:
-      warning("Not all runs have the same conditions")
+      logger.warning('Not all runs have the same conditions')
     # Get sorted list of all conditions
     conds = sorted(set([c for run_conds in conds for c in run_conds]))
-    # Make events dictionary: A list of onset, dur pairs for each run, condition
-    events = {(i, cond): [] for i in range(num_runs) for cond in conds}
-    for i in range(num_runs):
-      for l in tims[i]:
-        events[(i, l[0])].append(l[1:3])
-  
+    for i, tim in enumerate(tims):
+      for event in tim:
+        try:
+          event_table.append([i, event[0]] + map(float, event[1:]))
+        except ValueError:
+          raise NPDLError(('Timing files must contain only numbers in onset,' +
+                           'duration, height columns.'))
+
+  # Construct events data structure
+  events = Events(event_table, run_lens, conds, tr)
+
+  # Warn about covariate centering
+  cont_conds = []
+  for cond in conds:
+    if events.types[cond] == 'continuous':
+      cont_conds.append(cond)
+      logger.warning('Centering continuous predictor for condition {}.'.format(cond))
+      if 'classic' in mode:
+        logger.warning(('Continuous predictor for condition {} ' +
+                        'will be ignored in classic mode.').format(cond))
+
   # Check conditions against exclude conditions
   if not set(Xconds) < set(conds):
-    warning("Exclude conditions not a subset of conditions.")
+    logger.warning('Exclude conditions not a subset of conditions.')
     Xconds = sorted(set(Xconds) & set(conds))
-  if not set(resp) < set(conds):
-    raise RoiError("Response conditions not a subset of conditions.")
+
   # Check that each cond has some events
-  event_count = {cond: np.sum([len(events[(i, cond)]) for i in range(num_runs)])
-                 for cond in conds}
   for cond in conds:
-    if event_count[cond] == 0:
-      warning('No events for condition {}. Adding to excluded list.'.format(cond))
-      # Actually, forget about that condition completely
+    if events.counts[cond] == 0:
+      logger.warning('No events for condition {}. ' +
+                     'Pretending like it doesn\'t exist.'.format(cond))
       conds.remove(cond)
-  mod_conds = sorted(set(conds) - set(resp))
-  # Convert lists of onsets and durations to numpy arrays
-  for k, ons_durs in events.iteritems():
-    try:
-      events[k] = np.array(ons_durs, dtype='f8')
-    except ValueError:
-      raise RoiError('Timing files should contain only numbers ' +
-                     'in onset, duration columns.')
-  
+
+  # Check how variable relative onsets are.
+  for cond in conds:
+    rel_ons = events.get_rel_onsets(cond)
+    if np.max(rel_ons) - np.min(rel_ons) > tr/2.:
+      logger.warning(('Onsets for condition {} vary by more than 1/2 TR, ' +
+                      'relative to start of containing TR.').format(cond))
+
+  # Check how variable tr durations are.
+  tr_durs = dict()
+  for cond in conds:
+    tr_dur = np.unique(events.get_tr_durs(cond))
+    if tr_dur.size > 1 and not mode.isdisjoint({'fir', 'classic'}):
+      raise NPDLError(('Not all events of condition {} have the same duration, ' +
+                       'even after rounding to the nearest TR.').format(cond))
+    tr_durs[cond] = tr_dur[0] + lag
+
   # ----------------------------------------------------------------------------
-  # Events preprocessing and bookkeeping (most of it to help with FIR model)
+  # Peak preparation
   # ----------------------------------------------------------------------------
 
-  log('Events bookkeeping.')
-  # Convert onsets and durations to trs
-  # Record onsets and offsets relative to start of start of onset tr
-  tr_ons, tr_durs, rel_ons, rel_offs = dict(), dict(), dict(), dict(), 
-  for cond in mod_conds:
-    for i in range(num_runs):
-      ons_durs = events[(i, cond)]
-      if ons_durs.size > 0:
-        # floor because we want the index of the tr containing the onset
-        tr_ons[(i, cond)] = (np.floor(ons_durs[:, 0]/tr)).astype('i4')
-        # onsets and offsets relative to start of onset tr
-        rel_ons[(i, cond)] = ons_durs[:, 0] - tr_ons[(i, cond)]*tr
-        rel_offs[(i, cond)] = rel_ons[(i, cond)] + ons_durs[:, 1]
-        # tr duration should be as such to include the tr containing the offset
-        tr_durs[(i, cond)] = (np.ceil(rel_offs[(i, cond)]/tr)).astype('i4')
-      else:
-        tr_ons[(i, cond)] = []
-        rel_ons[(i, cond)] = []
-        rel_offs[(i, cond)] = []
-        tr_durs[(i, cond)] = []
-  # Combine relative onsets and offsets across runs
-  rel_ons = {cond: np.hstack([rel_ons[(i, cond)] for i in range(num_runs)]) 
-             for cond in mod_conds}
-  for cond in mod_conds:
-    if np.max(rel_ons[cond]) - np.min(rel_ons[cond]) > tr/2.0:
-      warning(('Onsets for condition {} vary by more than 1/2 TR, ' +
-              'relative to start of containing TR.').format(cond))
-  # Combine relative offsets across runs
-  rel_offs = {cond: np.hstack([rel_offs[(run, cond)] for run in range(num_runs)]) 
-              for cond in mod_conds}
-  # Collapse tr_durs to one number per condition (if possible) and add PSC lag
-  tr_durs = [np.unique(np.hstack([tr_durs[(i, cond)] for i in range(num_runs)])) 
-             for cond in mod_conds]
-  for i, cond in enumerate(mod_conds):
-    if np.size(tr_durs[i]) > 1:
-      raise RoiError(('Not all events of condition {} have the same duration, ' + 
-                     'even after rounding to the nearest TR.').format(cond))
-    tr_durs[i] = tr_durs[i][0] + lag
-  # Combine durations across runs
-  all_durs = {cond: np.hstack([events[(i, cond)][:, 1] for i in range(num_runs) 
-              if events[(i, cond)].size > 0]) for cond in conds}
-  for cond in mod_conds:
-    if np.max(all_durs[cond]) - np.min(all_durs[cond]) > tr/2.0:
-      warning('Durations for condition {} vary by more than 1/2 TR'.format(cond))
-  avg_durs = {cond: np.mean(all_durs[cond]) for cond in conds}
-  # Decide predicted peak time points based on canonical HRF. Calculated by
-  # computing max timepoint of convolved time series for durations 0.1s to
-  # 20s. Max time point as a function of duraction is linear with slope =
-  # 0.5375, intercept = 6.09625 until ~11 seconds, at which point constant
-  # at ~11.75.
-  peakt = dict()
-  for cond in mod_conds:
-    if avg_durs[cond] <= 11.0:
-      peakt[cond] = 0.5375*avg_durs[cond] + 6.09625
+  logger.log('Figuring out the peak windows.')
+
+  peak_wins, avg_durs = dict(), dict()
+  for cond in conds:
+    avg_durs[cond] = np.mean(events.event_query(cond)[:, 3])
+    if man_peakw:
+      peak_wins[cond] = PeakWindow(avg_durs[cond], cond, man_peak_win=peakw,
+                                   lag_secs=lag*tr, logger=logger)
     else:
-      peakt[cond] = 11.75
-    # peakt relative to start of first tr
-    peakt[cond] += np.mean(rel_ons[cond])
+      peak_wins[cond] = PeakWindow(avg_durs[cond], cond, peak_win_dur=peakw,
+                                   lag_secs=lag*tr, logger=logger)
 
   # ----------------------------------------------------------------------------
-  # Calculate PSC timecourses and peaks using FIR model
+  # Save summary timing information
   # ----------------------------------------------------------------------------
-  
-  log('Computing PSC using FIR model.')
-  fir_bases = [np.eye(dur) for dur in tr_durs]
-  # create FIR design matrix
-  run_dms = []
-  for i, run_len in enumerate(run_lens):
-    # initialize design matrix: length of run + wiggle room x sum of condition
-    # durations (in trs)
-    dm = np.zeros((run_len+50, np.sum(tr_durs)))
-    for j, cond in enumerate(mod_conds):
-      dur = tr_durs[j]
-      idx = np.sum(tr_durs[:j])
-      for ons in tr_ons[(i, cond)]:
-        dm[ons: ons+dur, idx: idx+dur] = fir_bases[j]
-    # trim down to run length
-    dm = dm[:run_len, :]
-    run_dms.append(dm)
-  DM = np.vstack(run_dms)
-  bl, beta = calc_glm(TS, DM, 'fir', cfd_mat)
-  # save FIR design mat
-  fir_psc, fir_peak = dict(), dict()
-  for j, cond in enumerate(mod_conds):
-    dur = tr_durs[j]
-    idx = np.sum(tr_durs[:j])
-    # convert beta to psc
-    fir_psc[cond] = (beta[idx: idx+dur]/bl)*100
-    # decide weights for peak trs
-    pt_frac = peakt[cond]/tr - np.floor(peakt[cond]/tr)
-    weights = np.array([1. - pt_frac, 1., pt_frac])
-    peak_tr = int(np.floor(peakt[cond]/tr))
-    # weighted average of peak tr + tr before and after to get peak estimate
-    fir_peak[cond] = np.sum(fir_psc[cond][peak_tr-1: peak_tr+2] * weights)/np.sum(weights)
-  
-  # ----------------------------------------------------------------------------
-  # Calculate PSC HRF basis model
-  # ----------------------------------------------------------------------------
- 
-  log('Computing PSC using FLOBS HRF basis model.')
-  # make design matrix
-  run_dms = []
-  for i, run_len in enumerate(run_lens):
-    # make high temporal resolution boxcar function for each condition
-    # bases are in 0.05s resolution
-    run_dur = int(np.ceil(run_len*tr*20))
-    paradigm = np.zeros((run_dur, len(conds)))
-    for j, cond in enumerate(conds):
-      ons_durs = events[(i, cond)]
-      for k in range(ons_durs.shape[0]):
-        ons_idx = np.floor(ons_durs[k, 0]/0.05)
-        off_idx = np.ceil(np.sum(ons_durs[k, :])/0.05)
-        # should make it so that height is read from timing file
-        paradigm[ons_idx:off_idx, j] = 1.0 
-    # convolve with all three basis functions
-    dm = [np.convolve(paradigm[:, j], FLOBS[:, k]) for j in range(len(conds))
-          for k in range(3)]
-    dm = np.hstack([covrt.reshape((-1, 1)) for covrt in dm])
-    # trim to run length
-    dm = dm[:run_dur, :]
-    # subsample to functional resolution
-    # take the prediction for the middle timepoint for each tr
-    subsamp_tps = np.arange(tr/2., run_len*tr, tr)
-    subsamp_inds = np.floor(subsamp_tps/0.05).astype('i4')
-    run_dms.append(dm[subsamp_inds, :])
-  DM = np.vstack(run_dms)
-  bl, beta = calc_glm(TS, DM, 'hrf', cfd_mat)
-  hrf_psc, psc_beta, hrf_len, stim_len = dict(), dict(), dict(), dict()
+
+  logger.log('Saving some information on event timing.')
+
+  tim_info_header = ('Cond,N,Type,Rel.ons.min,Rel.ons.max,Rel.ons.mean,' +
+                     'Rel.off.min,Rel.off.max,Rel.off.mean,TR.dur' +
+                     'Peak.win.start,Peak.win.stop').split(',')
+  tim_info = init_table(tim_info_header, len(conds)+1)
+
   for i, cond in enumerate(conds):
-    cond_beta = beta[3*i: 3*(i+1)].reshape((-1, 1))
-    # Round to nearest average duration + lag to nearest 0.5s, and find
-    # containing .05s resolution index.
-    hrf_len[cond], stim_len[cond] = [np.ceil(np.round(dur/0.5)*0.5/0.05)
-                                     for dur in [avg_durs[cond] + lag*tr, avg_durs[cond]]]
-    trial = np.zeros(hrf_len[cond])
-    trial[:stim_len[cond]] = 1.0
-    trial_hrf = [np.convolve(trial, FLOBS[:, j]).reshape((-1, 1)) for j in range(3)]
-    trial_hrf = np.hstack(trial_hrf)[:hrf_len[cond], :]
-    response = np.dot(trial_hrf, cond_beta)
-    hrf_psc[cond] = (response/bl) * 100.0
-    # use max of hrf bases as scalers to determine psc
-    scalers = np.max(trial_hrf, axis=0)
-    psc_beta[cond] = (scalers*cond_beta.reshape(-1)/bl) * 100.0
-  
+    N = events.counts[cond]
+    rel_ons = events.get_rel_onsets(cond)
+    rel_offs = events.get_rel_offsets(cond)
+    tim_info[i+1, :3] = cond, N, events.types[cond]
+    tim_info[i+1, 3:6] = [f(rel_ons) for f in [np.min, np.max, np.mean]]
+    tim_info[i+1, 6:9] = [f(rel_offs) for f in [np.min, np.max, np.mean]]
+    tim_info[i+1, 9] = tr_durs[cond]
+    tim_info[i+1, 10:12] = peak_wins[cond].peak_win
+
+  tim_info = tim_info.astype('S20')
+  np.savetxt('{}/timing_info.csv'.format(outdir), tim_info, fmt='%.20s', delimiter=',')
+
+  # ----------------------------------------------------------------------------
+  # Calculate PSC timecourses and peaks
+  # ----------------------------------------------------------------------------
+
+  if 'fir' in mode:
+    logger.log('Computing PSC using FIR model.')
+    
+    # Construct design mat
+    fir_bases = [np.eye(dur) for dur in tr_durs]
+    DM = events.build_design(conds, fir_bases, tr, boxcar=False)
+
+    # Fit FIR model
+    fir_bl, fir_beta = fit_glm(TS, DM, 'fir', cfd_mat, logger=logger)
+
+    # Organize results
+    fir_psc, fir_peak = dict(), dict()
+    for j, cond in enumerate(conds):
+      dur = tr_durs[cond]
+      idx = np.sum([tr_durs[c] for c in conds[:j]])
+      # convert beta to psc
+      fir_psc[cond] = (fir_beta[idx: idx+dur]/fir_bl)*100
+      # weighted average of peak window to get peak PSC estimate
+      fir_peak[cond] = [peak_wins[cond].calc_peak(fir_psc[cond], tr)]
+
+  if 'hrf' in mode:
+    logger.log('Computing PSC using HRF model.')
+
+    # Some constants
+    hrf_bin_dur = .05
+    ds_hrf_bin_dur = .25
+    num_bases = 3
+    
+    # Construct design mat
+    DM = events.build_design(conds, FLOBS, hrf_bin_dur, boxcar=True)
+
+    # Fit HRF model
+    hrf_bl, hrf_beta = fit_glm(TS, DM, 'hrf', cfd_mat, logger=logger)
+
+    # Organize results
+    hrf_psc, hrf_peak = dict(), dict()
+    for j, cond in enumerate(conds):
+      cond_beta = hrf_beta[num_bases*j: num_bases*(j+1)].reshape((-1, 1))
+
+      # length of psc response, and stimulus
+      hrf_len = np.ceil(tr*tr_durs[cond]/hrf_bin_dur)
+      stim_len = np.ceil(avg_durs[cond]/hrf_bin_dur)
+
+      # Construct example trial (height of boxcar = 1.0)
+      # NOTE: What should the height be for continuous predictors? Does it matter?
+      # interpretation: PSC change per sd of change in predictor.
+      trial = np.zeros(hrf_len)
+      trial[:stim_len] = 1.0
+      trial_hrf = [np.convolve(trial, FLOBS[:, k]).reshape((-1, 1))
+                   for k in range(num_bases)]
+      trial_hrf = np.hstack(trial_hrf)[:hrf_len, :]
+
+      # Compute fitted HRF
+      response = np.dot(trial_hrf, cond_beta)
+      # Downsample to 4 Hz
+      response = resample(response, hrf_bin_dur, ds_hrf_bin_dur)
+      hrf_psc[cond] = (response/hrf_bl) * 100.0
+
+      # Peak esimation
+      hrf_peak[cond] = [peak_wins[cond].calc_peak(hrf_psc[cond], ds_hrf_bin_dur)]
+
+      # Add betas to peak psc list.
+      # Use max of example trial hrf bases as scalers for transforming betas to psc.
+      scalers = np.max(trial_hrf, axis=0)
+      hrf_peak[cond].extend((scalers*cond_beta.reshape(-1)/hrf_bl) * 100.0)
+
+  if 'classic' in mode:
+    logger.log('Computing PSC using classic selective averaging.')
+
+    # Filter continuous noise components from time-series
+    cont_cfds = cfd_mat[:, spike_mask==0]
+    empty_DM = np.zeros((TS.shape[0], 0))
+    cfd_bl, cfd_beta = fit_glm(TS, empty_DM, cfd_mat=cont_cfds)
+    noise = np.dot(cont_cfds, cfd_beta.reshape((-1, 1)))
+    filt_TS = TS - noise
+
+    # Mark motion spikes in time-series
+    spikes = np.sum(cfd_mat[:, spike_mask==1], axis=1)
+    filt_TS[spikes > 0] = np.nan
+
+    # Ignore any continuous predictors
+    incl_conds = sorted(set(conds) - set(cont_conds))
+
+    # Initialize trial-by-trial data table
+    tbt_header = ['Run', 'Cond', 'Ons', 'Dur', 'Peak.psc']
+    psc_len = np.max([tr_durs[cond] for cond in incl_conds])
+    tbt_header += ['{0:0.1f}'.format(i*tr + tr/2.) for i in range(psc_len)]
+    num_events = np.sum([events.counts[cond] for cond in incl_conds])
+    tbt_data = init_table(tbt_header, num_events+1)
+
+    # Initialize baseline mask
+    bl_mask = np.ones(TS.size)
+
+    idx = 1
+    for i, run_len in enumerate(run_lens):
+      tr_prefix = np.sum(run_lens[:i])
+      for j, cond in enumerate(incl_conds):
+        tr_dur = tr_durs[cond]
+        cond_events = events.event_query(i, cond)[:, 2:4]
+        # Loop through in chronological order
+        cron_order = np.argsort(cond_events[:, 0])
+        for k in cron_order:
+          ons, dur = cond_events[k, :]
+
+          # Remove event from baseline mask
+          bl_stop = tr_prefix + int(round((ons + bl_opts[1])/tr))
+          bl_start = tr_prefix + int(round((ons + dur + bl_opts[0])/tr))
+          bl_mask[bl_stop: bl_start] = 0.0
+
+          # Update tbt data table
+          tr_ons = tr_prefix + int(np.floor(ons/tr))
+          # Make sure not to go past end of run, in case trial is clipped.
+          tr_off = min(tr_ons + tr_dur, tr_prefix + run_len)
+          bold = filt_TS[tr_ons: tr_off]
+          peak = peak_wins[cond].calc_peak(bold, tr)
+          tbt_data[idx, :5] = [i+1, cond, ons, dur, peak]
+          tbt_data[idx, 5:5+bold.size] = bold
+          idx += 1
+    
+    # Compute baseline and transform BOLD into psc 
+    bl = np.mean(filt_TS[bl_mask==1])
+    tbt_data[1:, 4:] = 100. * (tbt_data[1:, 4:] - bl)/bl
+
+    # Save trial by trial data
+    tbt_data = tbt_data.astype('S20')
+    np.savetxt('{}/classic_tbt_results.csv'.format(outdir), 
+               tbt_data, fmt='%.20s', delimiter=',')
+
+    # Aggregate and organize results
+    classic_psc, classic_peak = dict(), dict()
+    for cond in incl_conds:
+      cond_mask = tbt_data[:, 1] == cond
+      agg = np.nanmean(tbt_data[cond_mask, 4:], axis=0)
+      classic_psc[cond] = agg[1:]
+      classic_peak[cond] = agg[0]
+
   # ----------------------------------------------------------------------------
   # Write data & save figures
   # ----------------------------------------------------------------------------
   
-  log('Saving data and figures.')
-  # save FIR data and figures
-  incl_conds = sorted(set(mod_conds) - set(Xconds))
-  fir_cols = 'Cond,N,Ons.min,Ons.max,Ons.mean,Off.min,Off.max,Off.mean,Peak.t,Peak.psc'.split(',')
-  ps_len = np.max([tr_durs[i] for i, cond in enumerate(mod_conds) if cond in incl_conds])
-  fir_cols += ['{0:0.1f}'.format(i*tr + tr/2.) for i in range(ps_len)]
-  fir_data = np.ndarray((len(incl_conds)+1, len(fir_cols)), dtype=object)
-  # default value
-  fir_data[:, :] = np.nan
-  fir_data[0, :] = fir_cols
-  for i, cond in enumerate(incl_conds):
-    fir_data[i+1, 0] = cond
-    fir_data[i+1, 1] = event_count[cond]
-    fir_data[i+1, 2:5] = np.min(rel_ons[cond]), np.max(rel_ons[cond]), np.mean(rel_ons[cond])
-    fir_data[i+1, 5:8] = np.min(rel_offs[cond]), np.max(rel_offs[cond]), np.mean(rel_offs[cond])
-    fir_data[i+1, 8:10] = peakt[cond], fir_peak[cond]
-    fir_data[i+1, 10:10+fir_psc[cond].size] = fir_psc[cond]
-  fir_data = fir_data.astype('S20')
-  np.savetxt('{}/fir_results.csv'.format(outdir), fir_data, fmt='%.20s', delimiter=',')
+  if 'fir' in mode:
+    logger.log('Saving FIR mode PSC data.')
+    incl_conds = sorted(set(conds) - set(Xconds))
+    bin_dur = tr
+    out_prefix = '{}/fir_'.format(outdir)
+    peak_colnames = ['Peak.psc']
+    save_psc_data(fir_psc, fir_peak, events, incl_conds, bin_dur, 
+                  tr, out_prefix, peak_colnames=peak_colnames)
+  
+  if 'hrf' in mode:
+    logger.log('Saving HRF mode PSC data.')
+    incl_conds = sorted(set(conds) - set(Xconds))
+    bin_dur = ds_hrf_bin_dur
+    out_prefix = '{}/hrf_'.format(outdir)
+    peak_colnames = ['Peak.psc', 'Beta.amp', 'Beta.delay', 'Beta.disp']
+    save_psc_data(hrf_psc, hrf_peak, events, incl_conds, bin_dur, 
+                  tr, out_prefix, peak_colnames=peak_colnames)
 
-  if make_figs:
-    avg_stim_ons = np.mean([np.mean(rel_ons[cond]) for cond in incl_conds])
-    avg_stim_off = np.mean([np.mean(rel_offs[cond]) for cond in incl_conds])
-    avg_peakt = np.mean([peakt[cond] for cond in incl_conds])
-    plot_hrf(fir_psc, incl_conds, '{}/fir_psc.pdf'.format(outdir), 
-             [avg_stim_ons, avg_stim_off], [avg_peakt-tr, avg_peakt+tr], tr=tr, xunit=tr)
-
-  # save hrf data and figures
-  incl_conds = sorted(set(conds) - set(Xconds))
-  hrf_cols = ['Cond', 'N', 'Stim.dur', 'Peak.psc', 'Delay.psc', 'Disp.psc']
-  ps_len = int(np.max([hrf_len[cond] for cond in incl_conds]))
-  hrf_cols += ['{0:0.2f}'.format(i*0.05) for i in range(ps_len)]
-  hrf_data = np.ndarray((len(incl_conds)+1, len(hrf_cols)), dtype=object)
-  # default value
-  hrf_data[:, :] = np.nan
-  hrf_data[0, :] = hrf_cols
-  for i, cond in enumerate(incl_conds):
-    hrf_data[i+1, 0] = cond
-    hrf_data[i+1, 1] = event_count[cond]
-    hrf_data[i+1, 2] = stim_len[cond]*0.05
-    hrf_data[i+1, 3:6] = psc_beta[cond]
-    hrf_data[i+1, 6:6+hrf_len[cond]] = hrf_psc[cond].reshape(-1)
-  hrf_data = hrf_data.astype('S20')
-  np.savetxt('{}/hrf_results.csv'.format(outdir), hrf_data, fmt='%.20s', delimiter=',')
-
-  if make_figs:
-    incl_conds = sorted(set(incl_conds) - set(resp))
-    avg_stim_off = np.mean([stim_len[cond]*0.05 for cond in incl_conds])
-    avg_peakt = np.mean([peakt[cond] for cond in incl_conds])
-    plot_hrf(hrf_psc, incl_conds, '{}/hrf_psc.pdf'.format(outdir), [0, avg_stim_off],
-             [avg_peakt-tr, avg_peakt+tr], tr=tr, xunit=0.05)
-
+  if 'classic' in mode:
+    logger.log('Saving Classic mode PSC data.')
+    incl_conds = sorted(set(conds) - set(Xconds).union(set(cont_conds)))
+    bin_dur = tr
+    out_prefix = '{}/classic_'.format(outdir)
+    peak_colnames = ['Peak.psc']
+    save_psc_data(classic_psc, classic_peak, events, incl_conds, bin_dur, 
+                  tr, out_prefix, peak_colnames=peak_colnames)
   # ----------------------------------------------------------------------------
   # Finish
   # ----------------------------------------------------------------------------
-  
+
   fin_time = dt.now()
   fin_time_s = fin_time.strftime('%y-%m-%d %H:%M')
   run_time = str(fin_time - start_time)
-  log('Finished psc_calc at {}!\nRun time: {}'.format(fin_time_s, run_time))
-
+  logger.log('Finished psc_calc at {}! Run time: {}'.format(fin_time_s, run_time))
   return
 
-class RoiError(Exception):
-  """
-  Class for script-specific errors.
-  """
-  def __init__(self, msg):
-    if log_file is not None:
-      out = log_file
-    else:
-      out = sys.stderr
-    print('(pid={}) ERROR: {}'.format(PID, msg), file=out)
-    if log_dup is not None:
-      print('ERROR: {}'.format(msg), file=log_dup)
-    Exception.__init__(self, msg)
-    return
-
-def warning(*objs):
-  """
-  Warning function.
-  """
-  if log_file is not None:
-    out = log_file
-  else:
-    out = sys.stderr
-  print('(pid={}) WARNING:'.format(PID), *objs, file=out)
-  if log_dup is not None:
-    print('WARNING:', *objs, file=log_dup)
-  return
-
-def log(*objs):
-  """
-  Logging function.
-  """
-  if log_file is not None:
-    out = log_file
-  else:
-    out = sys.stdout
-  print('(pid={})'.format(PID), *objs, file=out)
-  if log_dup is not None:
-    print(*objs, file=log_dup)
-  return
-
-def img_read(img):
-  """
-  Read a .nii, .nii.gz, or .gii image. Return a TxN numpy array.
-
-  First dimension is time, second dimension contains all spatial dimensions
-  flattened according to numpy.reshape function.
-  """
-  # don't be derailed by white space
-  img = img.strip()
-  if not os.path.isfile(img):
-    raise RoiError('Image file ({}) does not exist.'.format(img))
-  ext = r'(\.nii(\.gz)?|\.gii)$'
-  img_ext = re.search(ext, img)
-  if img_ext is None:
-    raise RoiError(('Image file ({}) does not match any accepted' + 
-                     'extensions (.nii, .nii.gz, .gii)').format(img))
-  img_ext = img_ext.group()
-  if img_ext == '.nii':
-    try:
-      img = nib.load(img).get_data()
-    except:
-      raise RoiError('Image file ({}) could not be loaded'.format(img))
-    # reshape 4d nifti array to 2d, with time as first axis
-    newshape = (-1, np.product(img.shape[:3]))
-    img = img.reshape(newshape)
-  elif img_ext == '.nii.gz':
-    try:
-      img = nib.load(img).get_data()
-    except:
-      # apparently some files (including our raw data) have a .gz extension but
-      # are not gzipped, resulting in error. Remove extension before giving up.
-      tmpdir = tf.mkdtemp(prefix='img_read-')
-      img_copy = '{}/img.nii'.format(tmpdir)
-      copy(img, img_copy)
-      try:
-        img = nib.load(img_copy).get_data()
-        rmtree(tmpdir, ignore_errors=True)
-      except:
-        rmtree(tmpdir, ignore_errors=True)
-        raise RoiError('Image file ({}) could not be loaded'.format(img))
-    # reshape 4d nifti array to 2d, with time as first axis
-    newshape = (-1, np.product(img.shape[:3]))
-    img = img.reshape(newshape)
-  else:
-    try:
-      img = gifti.read(img)
-    except:
-      raise RoiError('Image file ({}) could not be loaded'.format(img))
-    img = np.array(map(lambda d: d.data, img.darrays))
-  return img
-
-def read_table(f, skip_head=False, comment="#", row_patt=r'[\r\n]+', col_patt=r'[ ,\t]+'):
-  """
-  General function for reading tabular data.
-  """
-  # don't be derailed by white space
-  f = f.strip()
+def dur_check(dur, optname, nonneg=True):
+  """Check if command-line option is numeric and non-negative."""
   try:
-    table = open(f).read().strip()
-  except IOError:
-    raise RoiError('File ({}) does not exist.'.format(f))
-  table = [row for row in re.split(row_patt, table) 
-           if not (len(row) == 0 or row[0] == comment)]
-  if skip_head:
-    table = table[1:]
-  table = [map(num_convert, re.split(col_patt, row.strip())) for row in table]
-  return table
-
-def num_convert(x):
-  """
-  Convert to number if possible.
-  """
-  try: return float(x)
-  except: return x
+    dur = float(dur)
+  except ValueError:
+    raise NPDLError('{} option ({}) has bad format.'.format(optname, dur))
+  if dur < 0 and nonneg:
+    raise NPDLError('{} option ({}) cannot be negative.'.format(optname, dur))
+  return dur
 
 def read_run_cfds(run_cfds, run_len):
-  """
-  Read a list standard FSL confound matrix file.
-  # TRs X # Confound regressors.
+  """Read a list of standard FSL confound matrix files.
+
+  Returns:
+    run_cfd (2D Array): First axis is time, second is the individual confounds.
+    spike_mask (1D Array): Size is number of confounds. Indicates whether
+      confound is a spike regressor.
   """
   if len(run_cfds) == 0:
     run_cfd = np.zeros((run_len, 0))
+    spike_mask = np.zeros(0, dtype=int)
   else:
-    run_cfds = [read_table(cfd) for cfd in run_cfds]
     try:
-      run_cfds = [np.array(cfd, dtype='f8') for cfd in run_cfds]
-    except ValueError:
-      raise RoiError('Confound text file(s) have bad format')
+      run_cfds = [np.genfromtxt(cfd, dtype='f8') for cfd in run_cfds]
+    except:
+      raise NPDLError('Confound text file(s) have bad format')
     len_checks = [cfd.shape[0] == run_len for cfd in run_cfds]
     if False in len_checks:
-      raise RoiError('Confound regressors should have same length ' +
+      raise NPDLError('Confound regressors should have same length ' +
                      'as matching functional run.')
     run_cfd = np.hstack(run_cfds)
-  return run_cfd
+    # Determine type of confound
+    # Normalize continuous covariates (in particular, center)
+    spike_mask = np.ones(run_cfd.shape[1], dtype=int)
+    for i in range(run_cfd.shape[1]):
+      if np.sum(run_cfd[:, i] == np.round(run_cfd[:, i])) < run_len:
+        run_cfd[:, i] = normalize(run_cfd[:, i])
+        spike_mask[i] = 0
+      elif np.sum(run_cfd[:, i]) != 1.:
+        raise NPDLError(('Only continuous covariates and spike regressors' +
+                        'accepted as confounds.'))
+  return run_cfd, spike_mask
 
-def calc_glm(TS, DM, out_prefix, cfd_mat=None, intercept=True):
+class Events(object):
+  """Trial event sequences.
+
+  Args:
+    event_table (2D array, dtype=object): Each row is an event containing: run,
+      condition, onset, duration, height.
+    conds (list): List of condition names in event_table.
+    run_lens (list): List of run lengths.
+    tr (float): TR of functional data in seconds.
   """
-  Calculate GLM beta weights. Return baseline and PSC betas.
+
+  def __init__(self, event_table, conds, run_lens, tr):
+    self.event_table = np.array(event_table, dtype=object)
+    self.conds = conds
+    self.run_lens = run_lens
+    self.tr = tr
+    self.counts = {cond: self.event_query(cond).shape[0] for cond in self.conds}
+    self.types = {cond: self.check_event_type(cond) for cond in self.conds}
+    return
+
+  def event_query(self, run=None, cond=None, ons=None):
+    """Look up events matching some criteria."""
+    query = self.event_table[:, :]
+    for i, key in enumerate([run, cond, ons]):
+      if key is not None:
+        query = query[(query[:, i] == key), :]
+    return query
+
+  def check_event_type(self, cond, center_cont=True, norm_cont=True):
+    """Check whether event is a dummy or continuous, and optionally center."""
+    cond_mask = (self.event_table[:, 1] == cond)
+    heights = self.event_table[cond_mask, 4]
+    if set(np.unique(heights)) <= {1., 0.}:
+      event_type = 'dummy'
+    else:
+      event_type = 'continuous'
+      if center_cont:
+        heights = heights - np.mean(heights)
+      if norm_cont:
+        heights = heights/np.std(heights)
+      self.event_table[cond_mask, 4] = heights
+    return event_type
+
+  def build_design(self, incl_conds, bases, bin_dur, boxcar=True):
+    """Construct design matrix by convolving event sequence with bases.
+
+    Args:
+      incl_conds (list): List of condition names to include.
+      bases (2D array or list): Hemodynamic basis functions. Can be either
+        a single set (2D array, shape (time, num_bases)), or a different set
+        per condition (list of 2D arrays).
+      bin_dur (float): Temporal resolution of basis functions.
+      boxcar (bool): Whether events whould be modeled as boxcars or delta
+        impulses.
+
+    Returns:
+      dm: Convolved design matrix (2D array, shape (time, num_regressors))
+    """
+    run_dms = []
+    for i, run_len in enumerate(self.run_lens):
+      run_len_bins = int(round(run_len*self.tr/bin_dur))
+      paradigm = np.zeros((run_len_bins, len(incl_conds)))
+      for j, cond in enumerate(incl_conds):
+        events = self.event_query(i, cond)
+        for k in range(events.shape[0]):
+          ons, dur, ht = events[k, 2:]
+          ons_ind = int(np.floor(ons/bin_dur))
+          if boxcar:
+            off_ind = int(np.ceil((ons + dur)/bin_dur))
+          else:
+            off_ind = ons_ind + 1
+          paradigm[ons_ind:off_ind, j] = ht
+      # Convolve with bases.
+      run_dm = [np.convolve(paradigm[:, j], bases[:, k])[:run_len_bins]
+                for j in range(len(incl_conds))
+                for k in range(bases.shape[1])]
+      # Downsample for basis to TR resolution
+      run_dm = [resample(covrt, bin_dur, self.tr) for covrt in run_dm])
+      # Form design matrix
+      run_dm = np.hstack([covrt.reshape((-1, 1)) for covrt in run_dm])
+      run_dms.append(run_dm)
+    dm = np.vstack(run_dms)
+    return dm
+
+  def get_tr_onsets(self, run=None, cond=None):
+    onsets = self.event_query(run, cond)[:, 2]
+    tr_onsets = np.floor(onsets/self.tr).astype(int)
+    return tr_onsets
+
+  def get_rel_onsets(self, run=None, cond=None):
+    onsets = self.event_query(run, cond)[:, 2]
+    rel_onsets = onsets - self.get_tr_onsets(run, cond)*self.tr
+    return rel_onsets
+
+  def get_rel_offsets(self, run=None, cond=None):
+    durs = self.event_query(run, cond)[:, 3]
+    rel_offsets = self.get_rel_onsets(run, cond) + durs
+    return rel_offsets
+
+  def get_tr_durs(self, run=None, cond=None):
+    tr_durs = np.ceil(self.get_rel_offsets(run, cond)/self.tr).astype(int)
+    return tr_durs
+
+class PeakWindow(object):
+  """PSC peak window.
+
+  Args:
+    trial_dur (float): Length of trial in seconds.
+    cond (str): Name of condition.
+    peak_win_dur (float): Length of peak averaging window in seconds.
+    man_peak_win (tuple): 2-tuple of floats representing start and end of
+      manual peak averaging window, in seconds, relative to trial onset.
+    lag_secs (float): How long trial HRF persists after trial offset.
+    logger (Logger instance): For issuing command-line warnings to user.
   """
-  # prepend intercept
-  if intercept:
-    DM = np.hstack([np.ones((DM.shape[0], 1)), DM])
-  # append confound regressors
-  if not (cfd_mat is None or cfd_mat.shape[1] == 0):
-    DM = np.hstack([DM, cfd_mat])
-  # save design matrix
-  np.savetxt('{}/{}_design.txt'.format(outdir, out_prefix), DM, delimiter=' ')
-  # calculate singular values
-  try: 
-    S = np.linalg.svd(DM, compute_uv=False)
-  except LinAlgError:
-    raise RoiError('Bad design matrix: SVD did not converge.')
-  S_str = ' '.join(map(str, S))
-  log('Singular values for {} design mat: {}.'.format(out_prefix, S_str))
-  # determine if rank deficient
-  # as in matrix_rank function
-  eps = np.finfo('f8').eps
-  thresh = S.max() * np.max(DM.shape) * eps
-  rank = np.sum(S > thresh)
-  log('Design matrix width for {}: {}; rank: {}.'.format(out_prefix, DM.shape[1], rank))
-  if rank < S.size:
-    raise RoiError('Bad design matrix: rank deficient.')
-  # calculate betas
-  # y = X*beta
-  # beta = (X'X)^-1 * X' * y
-  beta = np.dot(np.linalg.inv(np.dot(DM.T, DM)), np.dot(DM.T, TS))
-  beta = beta.reshape(-1)
-  if intercept:
-    bl, beta = beta[0], beta[1:]
+
+  def __init__(self, trial_dur, cond, peak_win_dur=6.0, man_peak_win=None,
+               lag_secs=14.0, logger=None):
+    self.trial_dur = trial_dur
+    self.peakt = self.calc_peakt(trial_dur)
+    self.cond = cond
+    if man_peak_win is None:
+      self.man_peak = False
+      self.peak_win = (self.peakt - peak_win_dur/2.,
+                       self.peakt + peak_win_dur/2.)
+    else:
+      self.man_peak = True
+      self.peak_win = man_peak_win
+    self.lag_secs = lag_secs
+    self.logger = logger
+    self.check_peak_win()
+    return
+
+  def calc_peakt(self, trial_dur):
+    """Decide predicted peak time based on canonical HRF.
+
+    Calculated by computing max timepoint of convolved time series for
+    durations 0.1s to 20s. Max time point as a function of duration is linear
+    with slope = 0.5375, intercept = 6.09625 until ~11 seconds, at which point
+    constant at ~11.75.
+
+    Note: This isn't quite right. peak time for 11 is 12.009. Need to revisit.
+
+    Args:
+      trial_dur (float): Duration of trial in seconds.
+
+    Returns:
+      peakt (float): Time in seconds of predicted peak.
+    """
+    if trial_dur <= 11.0:
+      peakt = 0.5375*avg_durs[cond] + 6.09625
+    else:
+      peakt = 11.75
+    return peakt
+
+  def check_peak_win(self):
+    """Check that peak window fits in trial HRF."""
+    if self.peak_win[0] < 0.0:
+      self.peak_win[0] = 0.0
+      if self.logger is not None:
+        self.logger.warning(('Start of peak window < 0 sec for cond: {}. ' +
+                             'Setting to 0.').format(self.cond))
+    if self.peak_win[1] > self.trial_dur + self.lag_secs:
+      self.peak_win[1] = self.trial_dur + self.lag_secs
+      if self.logger is not None:
+        logger.warning(('End of peak window is longer than trial HRF ' +
+                        'for cond: {}. Truncating.').format(self.cond))
+    return
+
+  def calc_peak(self, hrf, bin_dur, rel_onset=0.0):
+    """Calculate peak signal of HRF within peak window.
+
+    Args:
+      hrf (1D array): 1D time-series to analyze.
+      bin_dur (float): Duration of time-series bin in seconds.
+      rel_onset (float): Onset of trial in seconds relative to start of first
+        bin.
+
+    Returns:
+      peak (float): Weighted average of hrf from peak window.
+    """
+    hrf_dur = hrf.size * bin_dur
+
+    # Shift peak win depending on relative onset
+    peak_win = self.peak_win + rel_onset
+
+    # Determine weights based on peak window.
+    bin_onsets = np.arange(0., hrf_dur, bin_dur)
+    bin_offsets = bin_onsets + bin_dur
+    weights = np.min((bin_offsets - peak_win[0])/bin_dur,
+                     (peak_win[1] - bin_onsets)/bin_dur)
+    # Clamp weights between 0 and 1.
+    weights = np.min(np.max(weights, 0.), 1.)
+
+    # Mask nans in hrf.
+    nanmask = np.isnan(hrf).astype(int)
+    hrf = hrf[nanmask==0]
+    weights = weights[nanmask==0]
+
+    # Compute peak.
+    if hrf.size == 0:
+      peak = np.nan
+    else:
+      peak = np.sum(hrf*weights)/np.sum(weights)
+    return peak
+
+def save_psc_data(psc, peak, events, incl_conds, bin_dur, tr, out_prefix, 
+                  make_figs=True, peak_colnames=None):
+  """Save PSC peaks and time-courses.
+
+  Args:
+    psc (dict): Dictionary mapping conditions to PSC timecourses (1D arrays).
+    peak (dict): Dictionalry mapping conditions to peak PSC values (lists or 1D
+      arrays).
+    events (Events instance): Event timing information.
+    incl_conds (list): List of conditions to include.
+    bin_dur (float): Temporal resolution of PSC time-courses.
+    tr (float): Temporal resolution of original fMRI data (affects figure
+      x-axis only.)
+    out_prefix (str): Prefix path for output files.
+    make_figs (bool): Whether to make HRF figure.
+    peak_colnames (list): List of column names for PSC peak values.
+  """
+  # Put data table header together.
+  header = ['Cond', 'N']
+  if peak_colnames is not None:
+    header.extend(peak_colnames)
   else:
-    bl = None
-  return bl, beta
+    peak_len = np.max([len(peak[cond]) for cond in incl_conds])
+    header.extend(['Peak.psc.{}'.format(i+1) for i in range(peak_len)])
+  psc_len = np.max([psc[cond].size for cond in incl_conds])
+  header.extend(['{0:0.2f}'.format(i*bin_dur + bin_dur/2.) for i in range(psc_len)])
 
-def plot_hrf(psc, conds, out, stim_on_off=None, peak_on_off=None, tr=2.0, xunit=2.0, figw=6.0, figh=4.0):
-  """
-  Plot hrf time course for a set of conditions, save to ``out``.
-  
-  Inputs:
-    - ``psc``: dictionary mapping conditions to psc time courses.
-    - ``conds``: conditions to plot.
-    - ``out``: path to output figure.
-    - ``stim_on_off``: tuple containing start and stop of stimulus.
-    - ``peak_on_off``: tuple containing start and stop of peak window.
-    - ``tr``: duration of tr, which will determine placement of xticks.
-    - ``xunint``: unit of x axis (e.g. 2.0s, 0.05s).
-    - ``figw``: width of figure.
-    - ``figh``: height of figure.
-  """
+  # Initialize data table.
+  data_table = init_table(header, len(incl_conds)+1)
 
-  leadbuff = 0.7
-  backbuff = 0.25
-  plotw = figw - (leadbuff + backbuff)
+  # Fill in data.
+  for i, cond in enumerate(incl_conds):
+    data_table[i+1, :2] = [cond, events.counts[cond]]
+    peak_stop = 2+len(peak[cond])
+    psc_stop = peak_stop + psc[cond].size
+    data_table[i+1, 2:peak_stop] = peak[cond]
+    data_table[i+1, peak_stop:psc_stop] = fir_psc[cond]
+  data_table = data_table.astype('S20')
+  np.savetxt('{}_results.csv'.format(out_prefix), data_table, fmt='%.20s', delimiter=',')
 
-  bottombuff = 0.1
-  topbuff = 0.2
-  ploth = figh - (bottombuff + topbuff)
-
-  f, ax = plt.subplots(1, 1, figsize=(figw, figh))
-
-  pos = (leadbuff/figw, bottombuff/figh, plotw/figw, ploth/figh)
-  ax.set_position(pos)
-  ax.spines['right'].set_color('none')
-  ax.spines['top'].set_color('none')
-  ax.spines['bottom'].set_position(('data', 0))
-  #only left and bottom ticks
-  ax.yaxis.set_ticks_position('left')
-  ax.xaxis.set_ticks_position('bottom')
-
-  ymin = np.floor(np.min([np.min(psc[cond]) for cond in conds])/0.1)*0.1
-  ymax = np.ceil(np.max([np.max(psc[cond]) for cond in conds])/0.1)*0.1
-  ax.set_ylim(ymin, ymax)
-  
-  xmin = 0
-  xmax = np.max([psc[cond].size for cond in conds])*xunit
-  ax.set_xlim(xmin, xmax)
-  xvals = np.arange(xunit/2., xmax, xunit)
-  xticks = np.arange(tr, (np.floor(xmax/tr)+1)*tr, tr)
-  xticklabels = map(lambda x: '{0:0.1f}'.format(x), xticks)
-  plt.xticks(xticks, xticklabels)
-
-  plt.xlabel('Seconds')
-  plt.ylabel('Percent Signal Change')
-
-  if stim_on_off is not None:
-    ax.bar([stim_on_off[0]], [ymax], stim_on_off[1] - stim_on_off[0],
-            color=(0.8, 0.8, 0.8, 0.5), edgecolor='none', label='stim')
-  if peak_on_off is not None:
-    ax.bar([peak_on_off[0]], [ymax], peak_on_off[1] - peak_on_off[0],
-            color=(0.3, 0.3, 0.3, 0.5), edgecolor='none', label='peak')
-  
-  # don't show markers if the plot is 'high-res'
-  if xvals.size > 50:
-    ms = 0.
-  else:
-    ms = 7.
-  for cond in conds:
-    ax.plot(xvals[:psc[cond].size], psc[cond], marker='o', ms=ms,
-            ls='-', lw=3., label=cond, clip_on=False)
-  
-  ax.legend(loc='upper right', bbox_to_anchor=(1.05, 1.05), borderpad=0.2,
-            labelspacing=0.2)
-  plt.savefig(out, dpi=400, transparent=True)
+  # Save figures.
+  if make_figs:
+    avg_stim_ons = np.mean([events.get_rel_onsets(cond) for cond in incl_conds])
+    avg_stim_off = np.mean([events.get_rel_offsets(cond) for cond in incl_conds])
+    avg_peak_win = [np.mean([peak_wins[cond].peak_win[i] for cond in incl_conds])
+                    for i in [0, 1]]
+    plot_hrf(psc, incl_conds, '{}_psc.pdf'.format(out_prefix),
+             [avg_stim_ons, avg_stim_off], avg_peak_win, tr=tr, xunit=bin_dur)
   return
 
 if __name__ == '__main__':
   try:
     main()
-  except RoiError as e:
+  except NPDLError as e:
+    logger.error(e)
     sys.exit(1)
   sys.exit(0)

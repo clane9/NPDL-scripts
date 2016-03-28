@@ -1,0 +1,332 @@
+#!/usr/bin/env python
+
+"""Utility functions and classes for NPDL python scripts.
+"""
+
+# So you can print to stderr/stdout
+from __future__ import print_function
+
+import nibabel as nib
+from nibabel import gifti
+import numpy as np
+import os
+import re
+from shutil import copy, rmtree
+import subprocess as subp
+import sys
+import tempfile as tf
+
+class Logger(object):
+  """For logging, warnings, errors."""
+
+  def __init__(self, global_log=None, local_log=None, pid=None):
+    self.set_pid(pid)
+    self.set_global_log(global_log)
+    self.set_local_log(local_log)
+    return
+
+  def set_pid(self, pid):
+    self.pid = pid
+    if pid is not None:
+      self.pid_s = '(pid={}) '.format(pid)
+    else:
+      self.pid_s = ''
+    return
+
+  def set_global_log(self, global_log):
+    self.global_log = global_log
+    return
+
+  def set_local_log(self, local_log):
+    self.local_log = local_log
+    return
+
+  def error(self, msg):
+    msg = 'ERROR: {}'.format(msg)
+    self._print(msg, f=sys.stderr)
+    return
+
+  def warning(self, msg):
+    msg = 'WARNING: {}'.format(msg)
+    self._print(msg, f=sys.stderr)
+    return
+
+  def log(self, msg):
+    self._print(msg, f=sys.stdout)
+    return
+
+  def _print(self, msg, f=None):
+    for f in [self.global_log, self.local_log, f]:
+      if f is not None:
+        print(msg, file=f)
+    return
+
+class NPDLError(Exception):
+  """Lab-specific exceptions."""
+
+  def __init__(self, msg):
+    super(NPDLError, self).__init__(msg)
+    return
+
+def img_read(img_path):
+  """Read a .nii, .nii.gz, or .gii image.
+
+  Args:
+    img_path (str): Path to image file.
+
+  Returns:
+    img (2D array): First dimension is time, second dimension contains all
+      spatial dimensions flattened according to numpy.reshape function.
+  """
+  img_path, img_type = check_img_path(img_path)
+  if img_type == 'nii':
+    img = load_nii(img_path, compressed=False)
+  elif img_type == 'nii.gz':
+    img = load_nii(img_path, compressed=True)
+  else:
+    img = load_gii(img_path)
+  return img
+
+def check_img_path(img_path):
+  """Check image file extention."""
+  img_path = img_path.strip()
+  if not os.path.isfile(img_path):
+    raise NPDLError('Image file ({}) does not exist.'.format(img))
+  ext_patt = r'(\.nii(\.gz)?|\.gii)$'
+  img_ext = re.search(ext_patt, img_path)
+  if img_ext is None:
+    raise NPDLError(('Image file ({}) does not match any accepted' +
+                     'extensions (.nii, .nii.gz, .gii)').format(img_path))
+  img_type = img_ext.group()[1:]
+  return img_path, img_type
+
+def load_nii(img_path, compressed=False):
+  """Load Nifti or compressed Nifti."""
+  tmpdir = None
+  if compressed and not gz_test(img_path):
+    # Apparently some files (including our raw data) have a .gz extension but
+    # are not gzipped, resulting in error. Remove extension before giving up.
+    tmpdir = tf.mkdtemp(prefix='img_read-')
+    img_copy = '{}/img.nii'.format(tmpdir)
+    copy(img_path, img_copy)
+    img_path = img_copy
+  try:
+    img = nib.load(img_path).get_data()
+  except:
+    raise NPDLError('Image file ({}) could not be loaded'.format(img))
+  # Reshape 4d nifti array to 2d, with time as first axis.
+  newshape = (-1, np.product(img.shape[:3]))
+  img = img.reshape(newshape)
+  if tmpdir is not None:
+    rmtree(tmpdir)
+  return img
+
+def gz_test(path):
+  """Test if file is gzipped using magic number.
+
+  References:
+    http://stackoverflow.com/questions/13044562/python-mechanism-to-identify-compressed-file-type-and-uncompress
+    http://stackoverflow.com/questions/3703276/how-to-tell-if-a-file-is-gzip-compressed
+  """
+  magic = "\x1f\x8b\x08"
+  f = open(path)
+  if f.read(len(magic)) == magic:
+    return True
+  else:
+    return False
+
+def load_gii(img_path):
+  """Load Gifti."""
+  try:
+    img = gifti.read(img_path)
+  except:
+    raise NPDLError('Image file ({}) could not be loaded'.format(img))
+  img = np.array(map(lambda d: d.data, img.darrays))
+  return img
+
+def read_table(f, skip_head=False, comment="#", row_patt=r'[\r\n]+',
+               col_patt=r'[ ,\t]+', num_conv=True):
+  """Read tabular data, possibly of different formats.
+  """
+  f = f.strip()
+  try:
+    table = open(f).read().strip()
+  except IOError:
+    raise NPDLError('File ({}) does not exist.'.format(f))
+  table = [row for row in re.split(row_patt, table)
+           if not (len(row) == 0 or row[0] == comment)]
+  if skip_head:
+    table = table[1:]
+  table = [re.split(col_patt, row.strip()) for row in table]
+  if num_conv:
+    table = [map(num_convert, row) for row in table]
+  return table
+
+def num_convert(x):
+  """Convert to number if possible.
+  """
+  try:
+    return float(x)
+  except:
+    return x
+
+def init_table(header, num_rows, default_val=np.nan):
+  """Initialize a data table."""
+  table = np.ndarray((num_rows+1, len(header)), dtype=object)
+  table[:, :] = default_val
+  table[0, :] = header
+  return table
+
+def normalize(X):
+  """Subtract mean and divide by standard deviation."""
+  return (X - X.mean())/X.std()
+
+def resample(time_series, curr_bin_size, new_bin_size):
+  """Resample a time-series to a different temporal resolution.
+
+  Nearest-neighbor interpolation is used.
+
+  Args:
+    time_series (1D array): Float time-series.
+    curr_bin_size (float): Current temporal resolution of time-series.
+    new_bin_size (float): New temporal resolution of time-series (same units as
+      ``curr_bin_size``).
+
+  Returns:
+    resampled (1D array): Resampled time-series.
+  """
+  time_series = np.array(time_series)
+  duration = time_series.size * curr_bin_size
+  sample_locations = np.arange(new_bin_size/2., duration, new_bin_size)
+  sample_inds = np.floor(sample_locations/curr_bin_size).astype(int)
+  resampled = time_series[sample_inds]
+  return resampled
+
+def plot_hrf(psc, conds, out, ylim=None, stim_on_off=None, peak_on_off=None,
+             tr=2.0, xunit=2.0, figw=6.0, figh=4.0):
+  """
+  Plot hrf time course for a set of conditions and save.
+
+  Args:
+    psc (dict): Dictionary mapping conditions to PSC time courses.
+    conds (list): List of conditions to plot.
+    out (str): Path to output figure.
+    xlim (tuple): 2-tuple x-axis limits.
+    ylim (tuple): 2-tuple y-axis limits.
+    stim_on_off (tuple): 2-tuple containing start and stop of stimulus.
+    peak_on_off (tuple): 2-tuple containing start and stop of peak window.
+    tr (float): Duration of tr, which will determine placement of xticks.
+    xunint (float): Unit of x axis (e.g. 2.0, 0.05).
+    figw (float): Width of figure.
+    figh (float): height of figure.
+  """
+  f, ax = prep_fig(0.7, 0.25, 0.1, 0.2, figw, figh)
+
+  yres = 0.2
+  if ylim is None: 
+    ymin = np.floor(np.min([np.min(psc[cond]) for cond in conds])/yres)*yres
+    ymax = np.ceil(np.max([np.max(psc[cond]) for cond in conds])/yres)*yres
+    ymin = np.min([-yres, ymin])
+    ymax = np.max([yres, ymax])
+    ax.set_ylim(ymin, ymax)
+  else:
+    ymin, ymax = ylim
+    ax.set_ylim(*ylim)
+
+  yticks = np.arange(ymin, ymax+.1, .2)
+  yticklabels = map(lambda y: '{0:0.1f}'.format(y), yticks)
+  plt.yticks(yticks, yticklabels)
+  
+  xmin = 0
+  xmax = np.max([psc[cond].size for cond in conds])*xunit
+  ax.set_xlim(xmin, xmax)
+
+  xvals = np.arange(xunit/2., xmax, xunit)
+  xticks = np.arange(tr, (np.floor(xmax/tr)+1)*tr, tr)
+  xticklabels = map(lambda x: '{0:0.1f}'.format(x), xticks)
+  plt.xticks(xticks, xticklabels)
+
+  plt.xlabel('Seconds')
+  plt.ylabel('Percent Signal Change')
+
+  if stim_on_off is not None:
+    ax.bar([stim_on_off[0]], [ymax], stim_on_off[1] - stim_on_off[0],
+            color=(0.8, 0.8, 0.8, 0.5), edgecolor='none', label='stim')
+  if peak_on_off is not None:
+    ax.bar([peak_on_off[0]], [ymax], peak_on_off[1] - peak_on_off[0],
+            color=(0.3, 0.3, 0.3, 0.5), edgecolor='none', label='peak')
+
+  # Don't show markers if the plot is high-res.
+  if xvals.size > 50:
+    ms = 0.
+  else:
+    ms = 7.
+  for cond in conds:
+    ax.plot(xvals[:psc[cond].size], psc[cond], marker='o', ms=ms,
+            ls='-', lw=3., label=cond, clip_on=False)
+
+  ax.legend(loc='upper right', bbox_to_anchor=(1.05, 1.05), borderpad=0.2,
+            labelspacing=0.2)
+
+  plt.savefig(out, dpi=400, transparent=True)
+  return
+
+def prep_fig(leadbuff, backbuff, bottombuff, topbuff, figw, figh):
+  """Prepare single axis figure in standard way."""
+  plotw = figw - (leadbuff + backbuff)
+
+  ploth = figh - (bottombuff + topbuff)
+
+  f, ax = plt.subplots(1, 1, figsize=(figw, figh))
+
+  pos = (leadbuff/figw, bottombuff/figh, plotw/figw, ploth/figh)
+  ax.set_position(pos)
+  ax.spines['right'].set_color('none')
+  ax.spines['top'].set_color('none')
+  ax.spines['bottom'].set_position(('data', 0))
+
+  #only left and bottom ticks
+  ax.yaxis.set_ticks_position('left')
+  ax.xaxis.set_ticks_position('bottom')
+  return f, ax
+
+def fit_glm(TS, DM, out_prefix=None, cfd_mat=None, intercept=True, logger=None):
+  """Calculate GLM beta weights. Return baseline and PSC betas.
+  """
+  # prepend intercept
+  if intercept:
+    DM = np.hstack([np.ones((DM.shape[0], 1)), DM])
+  # append confound regressors
+  if not (cfd_mat is None or cfd_mat.shape[1] == 0):
+    DM = np.hstack([DM, cfd_mat])
+  # save design matrix
+  if out_prefix is not None:
+    np.savetxt('{}/{}_design.txt'.format(outdir, out_prefix), DM, delimiter=' ')
+  # calculate singular values
+  try:
+    S = np.linalg.svd(DM, compute_uv=False)
+  except LinAlgError:
+    raise NPDLError('Bad design matrix: SVD did not converge.')
+  S_str = ' '.join(['{0:.0f}'.format(s) for s in S])
+  if logger is not None:
+    logger.log('Singular values for {} design mat: {}.'.format(out_prefix, S_str))
+  # determine if rank deficient as in matrix_rank function
+  eps = np.finfo('f8').eps
+  thresh = S.max() * np.max(DM.shape) * eps
+  rank = np.sum(S > thresh)
+  if logger is not None:
+    logger.log('Design matrix width for {}: {}; rank: {}.'.format(out_prefix, DM.shape[1], rank))
+  if rank < S.size:
+    raise NPDLError('Design matrix is rank deficient.')
+  # calculate betas
+  # y = X*beta
+  # beta = (X'X)^-1 * X' * y
+  beta = np.dot(np.linalg.inv(np.dot(DM.T, DM)), np.dot(DM.T, TS))
+  if out_prefix is not None:
+    np.savetxt('{}/{}_beta.txt'.format(outdir, out_prefix), beta)
+  beta = beta.reshape(-1)
+  if intercept:
+    bl, beta = beta[0], beta[1:]
+  else:
+    bl = None
+  return bl, beta

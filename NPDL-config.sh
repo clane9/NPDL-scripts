@@ -53,7 +53,7 @@ if [[ -z $NPDL_SCRIPT_DIR ]]; then
   NPDL_SCRIPT_DIR=$(readlink -m ${0%/*})
 fi
 PATH=$PATH:$NPDL_SCRIPT_DIR/bin
-source $NPDL_SCRIPT_DIR/lib/NPDL-funcs.sh
+source $NPDL_SCRIPT_DIR/lib/npdl_funcs.sh
 
 # Set default SUBJECTS_DIR. Important because many functions rely on the
 # existence of 32k_fs_LR surfaces.
@@ -71,6 +71,9 @@ FIX_DIR=
 FIX_RDATA=
 AROMA_DIR=
 PRPRC_TEMP=$NPDL_SCRIPT_DIR/etc/preproc_template_design.fsf
+
+# Add python utilities to python path
+PYTHONPATH=$PYTHONPATH:$NPDL_SCRIPT_DIR/lib
 
 # ------------------------------------------------------------------------------
 
