@@ -2,8 +2,8 @@
 
 """
 Usage:
-  psc_calc [options] --roi=<roi> --runs=<runs> --cond=<timing>... --out=<outdir>
-  psc_calc [options] --roi=<roi> --runs=<runs> --events=<timing> --out=<outdir>
+  roi_extract [options] --roi=<roi> --runs=<runs> --cond=<timing>... --out=<outdir>
+  roi_extract [options] --roi=<roi> --runs=<runs> --events=<timing> --out=<outdir>
 
 Extract percent signal change from a set of functional runs within an ROI. PSC
 is extracted using either a finite-impulse response (FIR) model, FSL's flexible
@@ -18,8 +18,8 @@ References:
     Neuroimage,13(1), 210-217.
 
 Example:
-  psc_calc --roi=IFG.shape.gii --runs=\"yo_01.func.gii yo_02.func.gii:yo_02-cfd1.txt:yo_02-cfd2.txt\" --cond=\"A:yo_01-A.txt yo_02-A.txt\" --cond=\"B:yo_01-B.txt yo_02-B.txt\" --out=BLAH_01-IFG
-  psc_calc --roi=IFG.shape.gii --runs=\"yo_01.func.gii yo_02.func.gii:yo_02-cfd1.txt:yo_02-cfd2.txt\" --events=\"yo_01.csv yo_02.csv\" --out=BLAH_01-IFG
+  roi_extract --roi=IFG.shape.gii --runs=\"yo_01.func.gii yo_02.func.gii:yo_02-cfd1.txt:yo_02-cfd2.txt\" --cond=\"A:yo_01-A.txt yo_02-A.txt\" --cond=\"B:yo_01-B.txt yo_02-B.txt\" --out=BLAH_01-IFG
+  roi_extract --roi=IFG.shape.gii --runs=\"yo_01.func.gii yo_02.func.gii:yo_02-cfd1.txt:yo_02-cfd2.txt\" --events=\"yo_01.csv yo_02.csv\" --out=BLAH_01-IFG
 
 Arguments:
   --roi=<roi>        Binary mask image of ROI (.gii or .nii.gz)
@@ -217,8 +217,8 @@ def main():
   # save command line and start time to log
   start_time = dt.now()
   start_time_s = start_time.strftime('%y-%m-%d %H:%M')
-  logger.log(('psc_calc job started at {}.\n' +
-      'Command line:\n    psc_calc {}').format(start_time_s, ' '.join(sys.argv[1:])))
+  logger.log(('roi_extract job started at {}.\n' +
+      'Command line:\n    roi_extract {}').format(start_time_s, ' '.join(sys.argv[1:])))
 
   # ----------------------------------------------------------------------------
   # Preprocess functional data
@@ -582,7 +582,7 @@ def main():
   fin_time = dt.now()
   fin_time_s = fin_time.strftime('%y-%m-%d %H:%M')
   run_time = str(fin_time - start_time)
-  logger.log('Finished psc_calc at {}! Run time: {}'.format(fin_time_s, run_time))
+  logger.log('Finished roi_extract at {}! Run time: {}'.format(fin_time_s, run_time))
   return
 
 def dur_check(dur, optname, nonneg=True):
