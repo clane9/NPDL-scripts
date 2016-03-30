@@ -16,6 +16,12 @@ import subprocess as subp
 import sys
 import tempfile as tf
 
+# set Agg backend so that making figures doesn't depend on an X11 server
+# http://matplotlib.org/faq/howto_faq.html#matplotlib-in-a-web-application-server
+import matplotlib as mpl
+mpl.use('Agg')
+from matplotlib import pyplot as plt
+
 class Logger(object):
   """For logging, warnings, errors."""
 
@@ -195,11 +201,14 @@ def resample(time_series, curr_bin_size, new_bin_size):
   Returns:
     resampled (1D array): Resampled time-series.
   """
-  time_series = np.array(time_series)
-  duration = time_series.size * curr_bin_size
-  sample_locations = np.arange(new_bin_size/2., duration, new_bin_size)
-  sample_inds = np.floor(sample_locations/curr_bin_size).astype(int)
-  resampled = time_series[sample_inds]
+  if curr_bin_size == new_bin_size:
+    resampled = time_series
+  else:
+    time_series = np.array(time_series)
+    duration = time_series.size * curr_bin_size
+    sample_locations = np.arange(new_bin_size/2., duration, new_bin_size)
+    sample_inds = np.floor(sample_locations/curr_bin_size).astype(int)
+    resampled = time_series[sample_inds]
   return resampled
 
 def plot_hrf(psc, conds, out, ylim=None, stim_on_off=None, peak_on_off=None,
@@ -211,7 +220,6 @@ def plot_hrf(psc, conds, out, ylim=None, stim_on_off=None, peak_on_off=None,
     psc (dict): Dictionary mapping conditions to PSC time courses.
     conds (list): List of conditions to plot.
     out (str): Path to output figure.
-    xlim (tuple): 2-tuple x-axis limits.
     ylim (tuple): 2-tuple y-axis limits.
     stim_on_off (tuple): 2-tuple containing start and stop of stimulus.
     peak_on_off (tuple): 2-tuple containing start and stop of peak window.
@@ -290,7 +298,8 @@ def prep_fig(leadbuff, backbuff, bottombuff, topbuff, figw, figh):
   ax.xaxis.set_ticks_position('bottom')
   return f, ax
 
-def fit_glm(TS, DM, out_prefix=None, cfd_mat=None, intercept=True, logger=None):
+def fit_glm(TS, DM, cfd_mat=None, intercept=True, outdir=None, 
+            out_prefix=None, logger=None):
   """Calculate GLM beta weights. Return baseline and PSC betas.
   """
   # prepend intercept
@@ -300,7 +309,7 @@ def fit_glm(TS, DM, out_prefix=None, cfd_mat=None, intercept=True, logger=None):
   if not (cfd_mat is None or cfd_mat.shape[1] == 0):
     DM = np.hstack([DM, cfd_mat])
   # save design matrix
-  if out_prefix is not None:
+  if outdir is not None and out_prefix is not None:
     np.savetxt('{}/{}_design.txt'.format(outdir, out_prefix), DM, delimiter=' ')
   # calculate singular values
   try:
@@ -308,21 +317,22 @@ def fit_glm(TS, DM, out_prefix=None, cfd_mat=None, intercept=True, logger=None):
   except LinAlgError:
     raise NPDLError('Bad design matrix: SVD did not converge.')
   S_str = ' '.join(['{0:.0f}'.format(s) for s in S])
-  if logger is not None:
+  if logger is not None and out_prefix is not None:
     logger.log('Singular values for {} design mat: {}.'.format(out_prefix, S_str))
   # determine if rank deficient as in matrix_rank function
   eps = np.finfo('f8').eps
   thresh = S.max() * np.max(DM.shape) * eps
   rank = np.sum(S > thresh)
-  if logger is not None:
+  if logger is not None and out_prefix is not None:
     logger.log('Design matrix width for {}: {}; rank: {}.'.format(out_prefix, DM.shape[1], rank))
   if rank < S.size:
     raise NPDLError('Design matrix is rank deficient.')
   # calculate betas
   # y = X*beta
   # beta = (X'X)^-1 * X' * y
+  TS = TS.reshape((-1, 1))
   beta = np.dot(np.linalg.inv(np.dot(DM.T, DM)), np.dot(DM.T, TS))
-  if out_prefix is not None:
+  if outdir is not None and out_prefix is not None:
     np.savetxt('{}/{}_beta.txt'.format(outdir, out_prefix), beta)
   beta = beta.reshape(-1)
   if intercept:

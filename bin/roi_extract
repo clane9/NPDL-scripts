@@ -52,8 +52,8 @@ Arguments:
 Options:
   --mode=<mode>      Method for extracting PSC. Options are \"fir\", \"hrf\",
                      \"classic\", or combinations thereof. List should be
-                     delimited by spaces and enclosed in double quotes (E.g.
-                     --mode=\"fir hrf classic\") [default: fir].
+                     delimited by spaces and enclosed in double quotes
+                     (E.g. --mode=\"fir hrf classic\") [default: fir].
   --X=<conds>        List of conditions to ignore. These conditions will be
                      modeled but not reported.  (E.g. --X=\"A B C\").
   --lag=<secs>       How long after the offset of a stimulus should the PSC
@@ -62,8 +62,8 @@ Options:
                      window will be placed around the predicted peak time,
                      which is based on the shape of the canonical HRF.
                      Alternatively, you can specify two numbers to manually
-                     define the onset and offset of the peak window (E.g.
-                     --peakw=\"6.0 12.0\" [default: 6.0].
+                     define the onset and offset of the peak window
+                     (E.g. --peakw=\"6.0 12.0\") [default: 6.0].
   --bl=<opts>        Baseline start, relative to stimulus offset, and baseline
                      stop, relative to stimulus onset, both in seconds. Only
                      relevant in \"classic\" mode [default: 14.0 0.0].
@@ -93,26 +93,16 @@ import sys
 from npdl_utils import Logger, NPDLError, img_read, read_table, init_table, normalize, resample, plot_hrf, fit_glm
 
 logger = Logger(global_log=None, local_log=None, pid=os.getpid())
-plt = None
 
 def main():
   """Main function"""
-
-  # Define some global variables
-  global logger, outdir, plt
-
-  # Load FSL's optimal HRF basis functions
-  FLOBS = '{}/etc/default_flobs.flobs/hrfbasisfns.txt'.format(os.environ['FSLDIR'])
-  try:
-    FLOBS = np.genfromtxt(FLOBS)
-  except IOError:
-    raise NPDLError('No FLOBS found in FSL dir ({}).'.format(os.environ['FSLDIR']))
 
   # ----------------------------------------------------------------------------
   # Read command line and check argument formats
   # ----------------------------------------------------------------------------
 
   # Read log option first, since it matters now
+  global logger
   global_log = ARGS['--log']
   if global_log is not None:
     logdir = os.path.dirname(os.path.abspath(global_log))
@@ -157,6 +147,13 @@ def main():
   mode = set(ARGS['--mode'].split())
   if not (mode <= {'fir', 'hrf', 'classic'}):
     raise NPDLError('Invalid mode argument: {}.'.format(ARGS['--mode']))
+  # Load FSL's optimal HRF basis functions
+  if 'hrf' in mode:
+    FLOBS = '{}/etc/default_flobs.flobs/hrfbasisfns.txt'.format(os.environ['FSLDIR'])
+    try:
+      FLOBS = np.genfromtxt(FLOBS)
+    except IOError:
+      raise NPDLError('No FLOBS found in FSL dir ({}).'.format(os.environ['FSLDIR']))
 
   # Exclude conditons
   Xconds = ARGS['--X']
@@ -186,7 +183,7 @@ def main():
 
   # Baseline options
   bl_opts = ARGS['--bl'].split()
-  bl_opts = [dur_check(bl[i], '--bl', nonneg=False) for i in 0, 1]
+  bl_opts = [dur_check(bl_opts[i], '--bl', nonneg=False) for i in 0, 1]
   default_bl = [14.0, 0.0]
   if 'classic' not in mode and bl_opts != default_bl:
     logger.warning(('Baseline parameters only apply in "classic" mode. ' +
@@ -194,13 +191,6 @@ def main():
 
   # Make figures or not
   make_figs = not ARGS['--no-figs']
-  if make_figs:
-    # Importing pyplot can be time-consuming, so only do it if you have to
-    # set Agg backend so that making figures doesn't depend on an X11 server
-    # http://matplotlib.org/faq/howto_faq.html#matplotlib-in-a-web-application-server
-    import matplotlib as mpl
-    mpl.use('Agg')
-    from matplotlib import pyplot as plt
 
   # Output dir
   outdir = ARGS['--out']
@@ -259,12 +249,12 @@ def main():
   tmeans = [np.reshape(np.mean(func, axis=0), (1, -1)) for func in funcs]
   funcs = [func * (1000.0/tmean) for func, tmean in zip(funcs, tmeans)]
 
-  # Compute average time series for each run, and reshape as column vectors
-  run_TSs = [np.reshape(np.mean(func, axis=1), (-1, 1)) for func in funcs]
+  # Compute average time series for each run
+  run_TSs = [np.mean(func, axis=1) for func in funcs]
   run_lens = [ts.size for ts in run_TSs]
-  TS = np.vstack(run_TSs)
+  TS = np.hstack(run_TSs)
   # Save copy of time-series
-  np.savetxt('{}/roi_ts.txt'.format(outdir), TS)
+  np.savetxt('{}/roi_ts.txt'.format(outdir), TS.reshape((-1, 1)))
 
   # release some memory
   del funcs, tmeans, run_TSs, roi, mask, data_mask, data_masks
@@ -325,7 +315,7 @@ def main():
                            'duration, height columns.'))
 
   # Construct events data structure
-  events = Events(event_table, run_lens, conds, tr)
+  events = Events(event_table, conds, run_lens, tr)
 
   # Warn about covariate centering
   cont_conds = []
@@ -345,25 +335,27 @@ def main():
   # Check that each cond has some events
   for cond in conds:
     if events.counts[cond] == 0:
-      logger.warning('No events for condition {}. ' +
-                     'Pretending like it doesn\'t exist.'.format(cond))
+      logger.warning(('No events for condition: {}. ' +
+                      'Pretending like it doesn\'t exist.').format(cond))
       conds.remove(cond)
 
   # Check how variable relative onsets are.
+  avg_rel_ons = dict()
   for cond in conds:
-    rel_ons = events.get_rel_onsets(cond)
+    rel_ons = events.get_rel_onsets(cond=cond)
     if np.max(rel_ons) - np.min(rel_ons) > tr/2.:
-      logger.warning(('Onsets for condition {} vary by more than 1/2 TR, ' +
+      logger.warning(('Onsets for condition: {} vary by more than 1/2 TR, ' +
                       'relative to start of containing TR.').format(cond))
+    avg_rel_ons[cond] = np.mean(rel_ons)
 
   # Check how variable tr durations are.
   tr_durs = dict()
   for cond in conds:
-    tr_dur = np.unique(events.get_tr_durs(cond))
+    tr_dur = np.unique(events.get_tr_durs(cond=cond))
     if tr_dur.size > 1 and not mode.isdisjoint({'fir', 'classic'}):
-      raise NPDLError(('Not all events of condition {} have the same duration, ' +
+      raise NPDLError(('Not all events of condition: {} have the same duration, ' +
                        'even after rounding to the nearest TR.').format(cond))
-    tr_durs[cond] = tr_dur[0] + lag
+    tr_durs[cond] = int(np.percentile(tr_dur, 50)) + lag
 
   # ----------------------------------------------------------------------------
   # Peak preparation
@@ -373,13 +365,13 @@ def main():
 
   peak_wins, avg_durs = dict(), dict()
   for cond in conds:
-    avg_durs[cond] = np.mean(events.event_query(cond)[:, 3])
+    avg_durs[cond] = np.mean(events.event_query(cond=cond)[:, 3])
     if man_peakw:
-      peak_wins[cond] = PeakWindow(avg_durs[cond], cond, man_peak_win=peakw,
-                                   lag_secs=lag*tr, logger=logger)
+      peak_wins[cond] = PeakWindow(cond, avg_durs[cond], tr_durs[cond]*tr,
+                                   man_peak_win=peakw, logger=logger)
     else:
-      peak_wins[cond] = PeakWindow(avg_durs[cond], cond, peak_win_dur=peakw,
-                                   lag_secs=lag*tr, logger=logger)
+      peak_wins[cond] = PeakWindow(cond, avg_durs[cond], tr_durs[cond]*tr,
+                                   peak_win_dur=peakw, logger=logger)
 
   # ----------------------------------------------------------------------------
   # Save summary timing information
@@ -388,17 +380,19 @@ def main():
   logger.log('Saving some information on event timing.')
 
   tim_info_header = ('Cond,N,Type,Rel.ons.min,Rel.ons.max,Rel.ons.mean,' +
-                     'Rel.off.min,Rel.off.max,Rel.off.mean,TR.dur' +
+                     'Rel.off.min,Rel.off.max,Rel.off.mean,TR.dur,' +
                      'Peak.win.start,Peak.win.stop').split(',')
-  tim_info = init_table(tim_info_header, len(conds)+1)
+  tim_info = init_table(tim_info_header, len(conds))
 
   for i, cond in enumerate(conds):
     N = events.counts[cond]
-    rel_ons = events.get_rel_onsets(cond)
-    rel_offs = events.get_rel_offsets(cond)
     tim_info[i+1, :3] = cond, N, events.types[cond]
+
+    rel_ons = events.get_rel_onsets(cond=cond)
+    rel_offs = events.get_rel_offsets(cond=cond)
     tim_info[i+1, 3:6] = [f(rel_ons) for f in [np.min, np.max, np.mean]]
     tim_info[i+1, 6:9] = [f(rel_offs) for f in [np.min, np.max, np.mean]]
+
     tim_info[i+1, 9] = tr_durs[cond]
     tim_info[i+1, 10:12] = peak_wins[cond].peak_win
 
@@ -411,23 +405,24 @@ def main():
 
   if 'fir' in mode:
     logger.log('Computing PSC using FIR model.')
-    
+
     # Construct design mat
-    fir_bases = [np.eye(dur) for dur in tr_durs]
+    fir_bases = [np.eye(tr_durs[cond]) for cond in conds]
     DM = events.build_design(conds, fir_bases, tr, boxcar=False)
 
     # Fit FIR model
-    fir_bl, fir_beta = fit_glm(TS, DM, 'fir', cfd_mat, logger=logger)
+    fir_bl, fir_beta = fit_glm(TS, DM, cfd_mat, outdir=outdir, out_prefix='fir',
+                               logger=logger)
 
     # Organize results
     fir_psc, fir_peak = dict(), dict()
     for j, cond in enumerate(conds):
       dur = tr_durs[cond]
-      idx = np.sum([tr_durs[c] for c in conds[:j]])
+      idx = int(np.sum([tr_durs[c] for c in conds[:j]]))
       # convert beta to psc
       fir_psc[cond] = (fir_beta[idx: idx+dur]/fir_bl)*100
       # weighted average of peak window to get peak PSC estimate
-      fir_peak[cond] = [peak_wins[cond].calc_peak(fir_psc[cond], tr)]
+      fir_peak[cond] = [peak_wins[cond].calc_peak(fir_psc[cond], tr, avg_rel_ons[cond])]
 
   if 'hrf' in mode:
     logger.log('Computing PSC using HRF model.')
@@ -436,12 +431,13 @@ def main():
     hrf_bin_dur = .05
     ds_hrf_bin_dur = .25
     num_bases = 3
-    
+
     # Construct design mat
     DM = events.build_design(conds, FLOBS, hrf_bin_dur, boxcar=True)
 
     # Fit HRF model
-    hrf_bl, hrf_beta = fit_glm(TS, DM, 'hrf', cfd_mat, logger=logger)
+    hrf_bl, hrf_beta = fit_glm(TS, DM, cfd_mat, outdir=outdir, out_prefix='hrf',
+                               logger=logger)
 
     # Organize results
     hrf_psc, hrf_peak = dict(), dict()
@@ -449,8 +445,8 @@ def main():
       cond_beta = hrf_beta[num_bases*j: num_bases*(j+1)].reshape((-1, 1))
 
       # length of psc response, and stimulus
-      hrf_len = np.ceil(tr*tr_durs[cond]/hrf_bin_dur)
-      stim_len = np.ceil(avg_durs[cond]/hrf_bin_dur)
+      hrf_len = int(round(tr*tr_durs[cond]/hrf_bin_dur))
+      stim_len = int(round(avg_durs[cond]/hrf_bin_dur))
 
       # Construct example trial (height of boxcar = 1.0)
       # NOTE: What should the height be for continuous predictors? Does it matter?
@@ -462,13 +458,13 @@ def main():
       trial_hrf = np.hstack(trial_hrf)[:hrf_len, :]
 
       # Compute fitted HRF
-      response = np.dot(trial_hrf, cond_beta)
+      response = np.dot(trial_hrf, cond_beta).reshape(-1)
       # Downsample to 4 Hz
       response = resample(response, hrf_bin_dur, ds_hrf_bin_dur)
       hrf_psc[cond] = (response/hrf_bl) * 100.0
 
       # Peak esimation
-      hrf_peak[cond] = [peak_wins[cond].calc_peak(hrf_psc[cond], ds_hrf_bin_dur)]
+      hrf_peak[cond] = [peak_wins[cond].calc_peak(hrf_psc[cond], ds_hrf_bin_dur, avg_rel_ons[cond])]
 
       # Add betas to peak psc list.
       # Use max of example trial hrf bases as scalers for transforming betas to psc.
@@ -480,10 +476,13 @@ def main():
 
     # Filter continuous noise components from time-series
     cont_cfds = cfd_mat[:, spike_mask==0]
-    empty_DM = np.zeros((TS.shape[0], 0))
-    cfd_bl, cfd_beta = fit_glm(TS, empty_DM, cfd_mat=cont_cfds)
-    noise = np.dot(cont_cfds, cfd_beta.reshape((-1, 1)))
-    filt_TS = TS - noise
+    if cont_cfds.shape[1] > 0:
+      empty_DM = np.zeros((TS.shape[0], 0))
+      cfd_bl, cfd_beta = fit_glm(TS, empty_DM, cfd_mat=cont_cfds)
+      noise = np.dot(cont_cfds, cfd_beta.reshape((-1, 1)))
+      filt_TS = TS - noise
+    else:
+      filt_TS = TS
 
     # Mark motion spikes in time-series
     spikes = np.sum(cfd_mat[:, spike_mask==1], axis=1)
@@ -497,7 +496,7 @@ def main():
     psc_len = np.max([tr_durs[cond] for cond in incl_conds])
     tbt_header += ['{0:0.1f}'.format(i*tr + tr/2.) for i in range(psc_len)]
     num_events = np.sum([events.counts[cond] for cond in incl_conds])
-    tbt_data = init_table(tbt_header, num_events+1)
+    tbt_data = init_table(tbt_header, num_events)
 
     # Initialize baseline mask
     bl_mask = np.ones(TS.size)
@@ -514,8 +513,8 @@ def main():
           ons, dur = cond_events[k, :]
 
           # Remove event from baseline mask
-          bl_stop = tr_prefix + int(round((ons + bl_opts[1])/tr))
-          bl_start = tr_prefix + int(round((ons + dur + bl_opts[0])/tr))
+          bl_stop = tr_prefix + int(np.floor((ons + bl_opts[1])/tr))
+          bl_start = tr_prefix + int(np.ceil((ons + dur + bl_opts[0])/tr))
           bl_mask[bl_stop: bl_start] = 0.0
 
           # Update tbt data table
@@ -523,58 +522,62 @@ def main():
           # Make sure not to go past end of run, in case trial is clipped.
           tr_off = min(tr_ons + tr_dur, tr_prefix + run_len)
           bold = filt_TS[tr_ons: tr_off]
-          peak = peak_wins[cond].calc_peak(bold, tr)
+          peak = peak_wins[cond].calc_peak(bold, tr, avg_rel_ons[cond])
           tbt_data[idx, :5] = [i+1, cond, ons, dur, peak]
           tbt_data[idx, 5:5+bold.size] = bold
           idx += 1
-    
-    # Compute baseline and transform BOLD into psc 
-    bl = np.mean(filt_TS[bl_mask==1])
+
+    # Compute baseline and transform BOLD into psc
+    bl = np.nanmean(filt_TS[bl_mask==1])
     tbt_data[1:, 4:] = 100. * (tbt_data[1:, 4:] - bl)/bl
 
     # Save trial by trial data
     tbt_data = tbt_data.astype('S20')
-    np.savetxt('{}/classic_tbt_results.csv'.format(outdir), 
+    np.savetxt('{}/classic_tbt_results.csv'.format(outdir),
                tbt_data, fmt='%.20s', delimiter=',')
 
     # Aggregate and organize results
     classic_psc, classic_peak = dict(), dict()
     for cond in incl_conds:
       cond_mask = tbt_data[:, 1] == cond
-      agg = np.nanmean(tbt_data[cond_mask, 4:], axis=0)
+      agg = np.nanmean(tbt_data[cond_mask, 4:].astype(float), axis=0)
       classic_psc[cond] = agg[1:]
-      classic_peak[cond] = agg[0]
+      classic_peak[cond] = [agg[0]]
 
   # ----------------------------------------------------------------------------
   # Write data & save figures
   # ----------------------------------------------------------------------------
-  
+
   if 'fir' in mode:
     logger.log('Saving FIR mode PSC data.')
     incl_conds = sorted(set(conds) - set(Xconds))
     bin_dur = tr
-    out_prefix = '{}/fir_'.format(outdir)
+    out_prefix = '{}/fir'.format(outdir)
     peak_colnames = ['Peak.psc']
-    save_psc_data(fir_psc, fir_peak, events, incl_conds, bin_dur, 
-                  tr, out_prefix, peak_colnames=peak_colnames)
-  
+    save_psc_data(fir_psc, fir_peak, events.counts, avg_rel_ons, avg_durs,
+                  peak_wins, incl_conds, bin_dur, tr, out_prefix,
+                  peak_colnames=peak_colnames)
+
   if 'hrf' in mode:
     logger.log('Saving HRF mode PSC data.')
     incl_conds = sorted(set(conds) - set(Xconds))
     bin_dur = ds_hrf_bin_dur
-    out_prefix = '{}/hrf_'.format(outdir)
+    out_prefix = '{}/hrf'.format(outdir)
     peak_colnames = ['Peak.psc', 'Beta.amp', 'Beta.delay', 'Beta.disp']
-    save_psc_data(hrf_psc, hrf_peak, events, incl_conds, bin_dur, 
-                  tr, out_prefix, peak_colnames=peak_colnames)
+    save_psc_data(hrf_psc, hrf_peak, events.counts, None, avg_durs,
+                  peak_wins, incl_conds, bin_dur, tr, out_prefix,
+                  peak_colnames=peak_colnames)
 
   if 'classic' in mode:
     logger.log('Saving Classic mode PSC data.')
     incl_conds = sorted(set(conds) - set(Xconds).union(set(cont_conds)))
     bin_dur = tr
-    out_prefix = '{}/classic_'.format(outdir)
+    out_prefix = '{}/classic'.format(outdir)
     peak_colnames = ['Peak.psc']
-    save_psc_data(classic_psc, classic_peak, events, incl_conds, bin_dur, 
-                  tr, out_prefix, peak_colnames=peak_colnames)
+    save_psc_data(classic_psc, classic_peak, events.counts, avg_rel_ons, avg_durs,
+                  peak_wins, incl_conds, bin_dur, tr, out_prefix,
+                  peak_colnames=peak_colnames)
+
   # ----------------------------------------------------------------------------
   # Finish
   # ----------------------------------------------------------------------------
@@ -606,16 +609,22 @@ def read_run_cfds(run_cfds, run_len):
   if len(run_cfds) == 0:
     run_cfd = np.zeros((run_len, 0))
     spike_mask = np.zeros(0, dtype=int)
+
   else:
     try:
       run_cfds = [np.genfromtxt(cfd, dtype='f8') for cfd in run_cfds]
     except:
       raise NPDLError('Confound text file(s) have bad format')
+
     len_checks = [cfd.shape[0] == run_len for cfd in run_cfds]
     if False in len_checks:
       raise NPDLError('Confound regressors should have same length ' +
                      'as matching functional run.')
+
+    # Need to reshape in case you get a 1-D confound
+    run_cfds = [cfd.reshape((run_len, -1)) for cfd in run_cfds]
     run_cfd = np.hstack(run_cfds)
+
     # Determine type of confound
     # Normalize continuous covariates (in particular, center)
     spike_mask = np.ones(run_cfd.shape[1], dtype=int)
@@ -644,7 +653,7 @@ class Events(object):
     self.conds = conds
     self.run_lens = run_lens
     self.tr = tr
-    self.counts = {cond: self.event_query(cond).shape[0] for cond in self.conds}
+    self.counts = {cond: self.event_query(cond=cond).shape[0] for cond in self.conds}
     self.types = {cond: self.check_event_type(cond) for cond in self.conds}
     return
 
@@ -686,6 +695,10 @@ class Events(object):
     Returns:
       dm: Convolved design matrix (2D array, shape (time, num_regressors))
     """
+    # If only one set of bases given, expand to a list for compatibility
+    if isinstance(bases, np.ndarray):
+      bases = [bases]*len(incl_conds)
+
     run_dms = []
     for i, run_len in enumerate(self.run_lens):
       run_len_bins = int(round(run_len*self.tr/bin_dur))
@@ -700,30 +713,32 @@ class Events(object):
           else:
             off_ind = ons_ind + 1
           paradigm[ons_ind:off_ind, j] = ht
+
       # Convolve with bases.
-      run_dm = [np.convolve(paradigm[:, j], bases[:, k])[:run_len_bins]
+      run_dm = [np.convolve(paradigm[:, j], bases[j][:, k])[:run_len_bins]
                 for j in range(len(incl_conds))
-                for k in range(bases.shape[1])]
+                for k in range(bases[j].shape[1])]
       # Downsample for basis to TR resolution
-      run_dm = [resample(covrt, bin_dur, self.tr) for covrt in run_dm])
+      run_dm = [resample(covrt, bin_dur, self.tr) for covrt in run_dm]
       # Form design matrix
       run_dm = np.hstack([covrt.reshape((-1, 1)) for covrt in run_dm])
       run_dms.append(run_dm)
+
     dm = np.vstack(run_dms)
     return dm
 
   def get_tr_onsets(self, run=None, cond=None):
-    onsets = self.event_query(run, cond)[:, 2]
+    onsets = self.event_query(run, cond)[:, 2].astype(float)
     tr_onsets = np.floor(onsets/self.tr).astype(int)
     return tr_onsets
 
   def get_rel_onsets(self, run=None, cond=None):
-    onsets = self.event_query(run, cond)[:, 2]
+    onsets = self.event_query(run, cond)[:, 2].astype(float)
     rel_onsets = onsets - self.get_tr_onsets(run, cond)*self.tr
     return rel_onsets
 
   def get_rel_offsets(self, run=None, cond=None):
-    durs = self.event_query(run, cond)[:, 3]
+    durs = self.event_query(run, cond)[:, 3].astype(float)
     rel_offsets = self.get_rel_onsets(run, cond) + durs
     return rel_offsets
 
@@ -735,20 +750,21 @@ class PeakWindow(object):
   """PSC peak window.
 
   Args:
-    trial_dur (float): Length of trial in seconds.
     cond (str): Name of condition.
+    trial_dur (float): Length of trial in seconds.
+    psc_dur (float): Length of entire PSC response in seconds.
     peak_win_dur (float): Length of peak averaging window in seconds.
     man_peak_win (tuple): 2-tuple of floats representing start and end of
       manual peak averaging window, in seconds, relative to trial onset.
-    lag_secs (float): How long trial HRF persists after trial offset.
     logger (Logger instance): For issuing command-line warnings to user.
   """
 
-  def __init__(self, trial_dur, cond, peak_win_dur=6.0, man_peak_win=None,
-               lag_secs=14.0, logger=None):
+  def __init__(self, cond, trial_dur, psc_dur, peak_win_dur=6.0,
+               man_peak_win=None, logger=None):
+    self.cond = cond
     self.trial_dur = trial_dur
     self.peakt = self.calc_peakt(trial_dur)
-    self.cond = cond
+    self.psc_dur = psc_dur
     if man_peak_win is None:
       self.man_peak = False
       self.peak_win = (self.peakt - peak_win_dur/2.,
@@ -756,7 +772,6 @@ class PeakWindow(object):
     else:
       self.man_peak = True
       self.peak_win = man_peak_win
-    self.lag_secs = lag_secs
     self.logger = logger
     self.check_peak_win()
     return
@@ -778,7 +793,7 @@ class PeakWindow(object):
       peakt (float): Time in seconds of predicted peak.
     """
     if trial_dur <= 11.0:
-      peakt = 0.5375*avg_durs[cond] + 6.09625
+      peakt = 0.5375*trial_dur + 6.09625
     else:
       peakt = 11.75
     return peakt
@@ -790,8 +805,8 @@ class PeakWindow(object):
       if self.logger is not None:
         self.logger.warning(('Start of peak window < 0 sec for cond: {}. ' +
                              'Setting to 0.').format(self.cond))
-    if self.peak_win[1] > self.trial_dur + self.lag_secs:
-      self.peak_win[1] = self.trial_dur + self.lag_secs
+    if self.peak_win[1] > self.psc_dur:
+      self.peak_win[1] = self.psc_dur
       if self.logger is not None:
         logger.warning(('End of peak window is longer than trial HRF ' +
                         'for cond: {}. Truncating.').format(self.cond))
@@ -812,15 +827,16 @@ class PeakWindow(object):
     hrf_dur = hrf.size * bin_dur
 
     # Shift peak win depending on relative onset
-    peak_win = self.peak_win + rel_onset
+    peak_win = np.array(self.peak_win) + rel_onset
 
     # Determine weights based on peak window.
-    bin_onsets = np.arange(0., hrf_dur, bin_dur)
+    # Weight on bin b is the fraction of b within peak window.
+    # NOTE: IF peak start and stop are within 1 TR, weights aren't sensible.
+    bin_onsets = np.arange(hrf.size) * bin_dur
     bin_offsets = bin_onsets + bin_dur
-    weights = np.min((bin_offsets - peak_win[0])/bin_dur,
-                     (peak_win[1] - bin_onsets)/bin_dur)
-    # Clamp weights between 0 and 1.
-    weights = np.min(np.max(weights, 0.), 1.)
+    frac_after_peak_start = np.clip((bin_offsets - peak_win[0])/bin_dur, 0., 1.)
+    frac_before_peak_stop = np.clip((peak_win[1] - bin_onsets)/bin_dur, 0., 1.)
+    weights = np.min(np.vstack([frac_after_peak_start, frac_before_peak_stop]), axis=0)
 
     # Mask nans in hrf.
     nanmask = np.isnan(hrf).astype(int)
@@ -834,15 +850,19 @@ class PeakWindow(object):
       peak = np.sum(hrf*weights)/np.sum(weights)
     return peak
 
-def save_psc_data(psc, peak, events, incl_conds, bin_dur, tr, out_prefix, 
-                  make_figs=True, peak_colnames=None):
+def save_psc_data(psc, peak, counts, rel_ons, durs, peak_wins, incl_conds,
+                  bin_dur, tr, out_prefix, make_figs=True, peak_colnames=None):
   """Save PSC peaks and time-courses.
 
   Args:
     psc (dict): Dictionary mapping conditions to PSC timecourses (1D arrays).
-    peak (dict): Dictionalry mapping conditions to peak PSC values (lists or 1D
+    peak (dict): Dictionary mapping conditions to peak PSC values (lists or 1D
       arrays).
-    events (Events instance): Event timing information.
+    counts (dict): Dictionary mapping conditions to event counts.
+    rel_ons (dict or None): Dictionary mapping conditions to onsets relative to
+      start of TR (or None, in which case 0 is assumed)
+    durs (dict): Dictionary mapping conditions to event durations.
+    peak_wins (dict): Dictionary mapping conditions to PeakWindow instances.
     incl_conds (list): List of conditions to include.
     bin_dur (float): Temporal resolution of PSC time-courses.
     tr (float): Temporal resolution of original fMRI data (affects figure
@@ -862,26 +882,28 @@ def save_psc_data(psc, peak, events, incl_conds, bin_dur, tr, out_prefix,
   header.extend(['{0:0.2f}'.format(i*bin_dur + bin_dur/2.) for i in range(psc_len)])
 
   # Initialize data table.
-  data_table = init_table(header, len(incl_conds)+1)
+  data_table = init_table(header, len(incl_conds))
 
   # Fill in data.
   for i, cond in enumerate(incl_conds):
-    data_table[i+1, :2] = [cond, events.counts[cond]]
+    data_table[i+1, :2] = [cond, counts[cond]]
     peak_stop = 2+len(peak[cond])
     psc_stop = peak_stop + psc[cond].size
     data_table[i+1, 2:peak_stop] = peak[cond]
-    data_table[i+1, peak_stop:psc_stop] = fir_psc[cond]
+    data_table[i+1, peak_stop:psc_stop] = psc[cond]
   data_table = data_table.astype('S20')
   np.savetxt('{}_results.csv'.format(out_prefix), data_table, fmt='%.20s', delimiter=',')
 
+  if rel_ons is None:
+    rel_ons = {cond: 0.0 for cond in incl_conds}
   # Save figures.
   if make_figs:
-    avg_stim_ons = np.mean([events.get_rel_onsets(cond) for cond in incl_conds])
-    avg_stim_off = np.mean([events.get_rel_offsets(cond) for cond in incl_conds])
+    avg_stim_ons = np.mean([rel_ons[cond] for cond in incl_conds])
+    avg_stim_off = np.mean([rel_ons[cond] + durs[cond] for cond in incl_conds])
     avg_peak_win = [np.mean([peak_wins[cond].peak_win[i] for cond in incl_conds])
                     for i in [0, 1]]
     plot_hrf(psc, incl_conds, '{}_psc.pdf'.format(out_prefix),
-             [avg_stim_ons, avg_stim_off], avg_peak_win, tr=tr, xunit=bin_dur)
+             None, [avg_stim_ons, avg_stim_off], avg_peak_win, tr=tr, xunit=bin_dur)
   return
 
 if __name__ == '__main__':
