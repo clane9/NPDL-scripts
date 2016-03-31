@@ -6,6 +6,7 @@
 # So you can print to stderr/stdout
 from __future__ import print_function
 
+import gdist
 import nibabel as nib
 from nibabel import gifti
 import numpy as np
@@ -73,6 +74,87 @@ class NPDLError(Exception):
   def __init__(self, msg):
     super(NPDLError, self).__init__(msg)
     return
+
+class Surface(object):
+  """Class for representing cortical surfaces
+
+  Attributes:
+    surf_path (str): Surface file path.
+    coords (2D array): X, Y, Z coordinates for each surface vertex.
+    faces (2D array): Vertex index triplets for each triangular face in surface
+      mesh.
+    num_verts (int): Number of vertices in surface.
+    neighbors (2D array): Adjacency list represented as padded 2D array. The
+      ith row contain neighbors for vertex i. Pad value is num_verts.
+  """
+
+  def __init__(self, surf_path, max_neighbors=50):
+    self.surf_path = surf_path
+    try:
+      surf = gifti.read(surf_path)
+    except:
+      raise NPDLError(('Surface: {} does not exist ' +
+                       'or is not a valid Gifti file.').format(surf))
+
+    self.coords, self.faces = [surf.darrays[i].data for i in 0, 1]
+    surf.coords = surf.coords.astype(np.float64)
+    surf.faces = surf.coords.astype(np.int32)
+
+    self.num_verts = self.coords.shape[0]
+    self.neighbors = self.construct_neighbors(max_neighbors)
+    return
+
+  def distance(src, trg=None, max_distance=None):
+    """Compute minimum geodesic distance between source vertices and target
+    vertices using gdist library.
+    """
+    src = np.array(src, dtype=np.int32)
+    if trg is not None:
+      trg = np.array(trg, dtype=np.int32)
+    if max_distance is not None:
+      max_distance = np.float64(max_distance)
+    distances = gdist.compute_gdist(self.coords, self.faces, src, trg, max_distance)
+    return distances
+
+  def construct_neighbors(self, max_neighbors):
+    """Reshape list of triangle faces into padded adjacency list (2D Array)."""
+    nbr_dict = dict()
+
+    for face in self.faces:
+      for i in [0, 1, 2]:
+        other_inds = list({0, 1, 2} - {i})
+        nbd = nbr_dict.get(face[i], [])
+        for j in other_inds:
+          nbd.append(face[j])
+        nbr_dict[face[i]] = nbd
+
+    neighbors = np.ones((self.num_verts, max_neighbors), dtype=int) * self.num_verts
+
+    actual_max_neighbors = 0
+    for v in xrange(self.num_verts):
+      nbd = np.unique(nbr_dict[v])
+      actual_max_neighbors = max(nbd.size, actual_max_neighbors)
+      neighbors[v, :nbd.size] = nbd
+
+    neighbors = neighbors[:, :actual_max_neighbors]
+    return neighbors
+
+  def find_neighbors(self, verts, lower=False, stat=None):
+    """Find all (optionally lower) neighbors of a set of vertices."""
+    neighbors = self.neighbors[verts, :]
+    if lower and stat is not None:
+      stat = np.hstack([stat.reshape(-1), [np.nan]])
+      lower_mask = stat[neighbors] <= stat[verts].reshape((-1, 1))
+      neighbors = neighbors[lower_mask]
+    neighbors = np.setdiff1d(np.unique(neighbors), [self.num_verts])
+    return neighbors
+
+  def project_coord(self, coord):
+    """Project a coordinate onto the surface."""
+    coord = np.array(coord).reshape(1, 3)
+    dists = np.sum((self.coords - coord)**2, axis=1)
+    vertex = np.argmin(dists)
+    return vertex
 
 def img_read(img_path):
   """Read a .nii, .nii.gz, or .gii image.
@@ -149,6 +231,32 @@ def load_gii(img_path):
     raise NPDLError('Image file ({}) could not be loaded'.format(img))
   img = np.array(map(lambda d: d.data, img.darrays))
   return img
+
+def img_save(img_path, img, surf_path=None):
+  img_path, img_type = check_img_path(img_path)
+  if img_type in {'.nii', '.nii.gz'}:
+    save_nii(img_path, img)
+  else:
+    if surf_path is None:
+      raise NPDLError('A path to a valid surface is required to save a Gifti file.')
+    save_gii(img_path, img, surf_path)
+  return
+
+def save_nii(img_path, img):
+  img = img.T.reshape((img.shape[0], 1, 1, img.shape[1]))
+  img = nib.Nifti1Image(img, np.eye(4))
+  nib.save(img, img_path)
+  return
+
+def save_gii(img_path, img, surf_path):
+  tmpdir = tf.mkdtemp(prefix='img_save-')
+  tmp_img_path = '{}/img.nii.gz'.format(tmpdir)
+  save_nii(tmp_img_path, img)
+  status = subp.call(('wb_command -metric-convert -from-nifti ' +
+                      '{} {} {}').format(tmp_img_path, surf_path, img))
+  if status != 0:
+    raise NPDLError('Failed to save Gifti file: {}.'.format(img_path))
+  return
 
 def read_table(f, skip_head=False, comment="#", row_patt=r'[\r\n]+',
                col_patt=r'[ ,\t]+', num_conv=True):
@@ -231,7 +339,7 @@ def plot_hrf(psc, conds, out, ylim=None, stim_on_off=None, peak_on_off=None,
   f, ax = prep_fig(0.7, 0.25, 0.1, 0.2, figw, figh)
 
   yres = 0.2
-  if ylim is None: 
+  if ylim is None:
     ymin = np.floor(np.min([np.min(psc[cond]) for cond in conds])/yres)*yres
     ymax = np.ceil(np.max([np.max(psc[cond]) for cond in conds])/yres)*yres
     ymin = np.min([-yres, ymin])
@@ -244,7 +352,7 @@ def plot_hrf(psc, conds, out, ylim=None, stim_on_off=None, peak_on_off=None,
   yticks = np.arange(ymin, ymax+.1, .2)
   yticklabels = map(lambda y: '{0:0.1f}'.format(y), yticks)
   plt.yticks(yticks, yticklabels)
-  
+
   xmin = 0
   xmax = np.max([psc[cond].size for cond in conds])*xunit
   ax.set_xlim(xmin, xmax)
@@ -298,7 +406,7 @@ def prep_fig(leadbuff, backbuff, bottombuff, topbuff, figw, figh):
   ax.xaxis.set_ticks_position('bottom')
   return f, ax
 
-def fit_glm(TS, DM, cfd_mat=None, intercept=True, outdir=None, 
+def fit_glm(TS, DM, cfd_mat=None, intercept=True, outdir=None,
             out_prefix=None, logger=None):
   """Calculate GLM beta weights. Return baseline and PSC betas.
   """

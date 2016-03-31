@@ -74,16 +74,11 @@ Options:
   -h, --help         View this message.
 """
 
-# So you can print to stderr/stdout
-from __future__ import print_function
-
 # Parse args before imports for fast help message
 from docopt import docopt
 ARGS = docopt(__doc__)
 
 from datetime import datetime as dt
-import nibabel as nib
-from nibabel import gifti
 import numpy as np
 import os
 import re

@@ -1,0 +1,492 @@
+#!/usr/bin/env python
+
+"""
+Usage:
+  make_roi [options] vertex (-p <perc> | -n <N> | -t <thr>) <stat> <surf> <info> <roi>
+  make_roi [options] cluster (-p <perc> | -t <thr>) <stat> <surf> <info> <roi>
+  make_roi [options] watershed [-p <perc> | -n <N> | -t <thr>] [-s <seeds>] <stat> <surf> <info> <roi>
+  make_roi [options] circle -r <rad> (-c <coord> | <stat>) <surf> <info> <roi>
+
+Arguments:
+  vertex               Choose all vertices meeting some criteria.
+  cluster              Choose all contiguous vertices meeting some criteria.
+                       All matching clusters reported.
+  watershed            Fill in vertices around distinct peaks until some
+                       criteria met. Vertices are filled using "watershed"
+                       algorithm. All matching ROIs reported.
+  circle               Choose all vertices within some radius of a given
+                       coordinate, or the peak of a statistical map.
+  -p <perc>            Percentage threshold for ROI. Value must be between 1.0
+                       and 100.0 (Not between 0.0 and 1.0!). (E.g. vertex -p 10
+                       results in ROI containing top 10% of vertices.)
+  -n <N>               Number of vertices to include in ROI. (E.g. vertex -n 100
+                       results in ROI containing top 100 vertices.)
+  -t <thr>             Raw stat threshold for ROI. (E.g. cluster -t 3.1 results
+                       in all clusters above 3.1.)
+  -d <dist>            Minimum distance (in mm) between distinct peaks. Only
+                       relevant in watershed mode. (E.g. watershed -d 30 means
+                       that the seed peaks for distinct watershed regions will
+                       be at least 30mm apart.)
+  -s <seeds>           Path to text file containing seed vertices for
+                       watershed. One row per seed region, vertices separated
+                       by spaces within a row. (E.g. -s seeds.txt.)
+  -r <rad>             Radius of circular ROI. Only relevant in circle mode.
+  -c <coord>           Center coordinate of circular ROI. Coordinate can be
+                       X,Y,Z or vertex index. Only relevant in circle mode.
+                       (E.g. -c 1234.)
+  <stat>               Statistical map in Nifti or metric Gifti format (E.g.
+                       zstat1.func.gii).
+  <surf>               Gifti surface file, in same space as stat map (E.g.
+                       lh.midthickness.surf.gii).
+  <info>               Path to csv table where ROI information will be saved.
+                       If it already exists it'll be appended. Otherwise it'll
+                       be created.
+  <roi>                Path to output ROI, excluding file extension. This will
+                       determine the prefix of output metric Gifti ROI files
+                       (E.g. sub/rois/IFG.lh --> sub/rois/IFG.lh.1.shape.gii).
+                       Importantly, the basename will also be the first column
+                       in the info file, so make it unique.
+
+Options:
+  --search <mask>      Seach space mask in Nifti or metric Gifti format. Must
+                       be in same space as stat map and surface. (E.g. --search
+                       lh.IFG.shape.gii.)
+  --lit-coord <coord>  Measure and report distance from ROI peak to literature
+                       or group average coordinate. Coordinate can be X,Y,Z or
+                       vertex index (E.g. --lit-coord=20.,19.,-5.).
+  --peak-dist <dist>   Minimum distance between distinct peaks in watershed
+                       mode. Can be overridden by including a seed file.
+                       [default: 30]
+  --peak-thr <thr>     Minimum threshold for a local maxima to count as a peak
+                       in watershed mode. Can be overridden by including a seed
+                       file. [default: 2.3]
+  --fill-rate <dec>    Amount to decrease watershed threshold by on each
+                       iteration. [default: .05]
+  --eval <metric>      Metric to use when weighing ROI candidates. Options are
+                       "strength" (sum of stat values), "dist" (weighted
+                       average distance from literature coord to ROI),
+                       "strength / dist" (strength / distance), or "strength /
+                       spread" (strength / weighted average distance from ROI
+                       peak to all other ROI vertices) [default: strength].
+  -h, --help           Display this message.
+"""
+
+# Parse args before imports for fast help message
+from docopt import docopt
+ARGS = docopt(__doc__)
+
+from datetime import datetime as dt
+import numpy as np
+import os
+import re
+import sys
+
+from npdl_utils import Logger, NPDLError, Surface, img_read, img_save, read_table, init_table
+
+logger = Logger(global_log=None, local_log=None, pid=os.getpid())
+
+def main():
+  """Main function"""
+
+  # ----------------------------------------------------------------------------
+  # Read command line and check argument formats
+  # ----------------------------------------------------------------------------
+
+  # Mode
+  for mode_opt in ['vertex', 'cluster', 'watershed', 'circle']:
+    if ARGS[mode_opt]:
+      mode = mode_opt
+      break
+
+  # Numerical options
+  opt_names = ['-p', '-n', '-t', '-r', '-d', '--peak-dist', '--peak-thr', '--fill-rate']
+  num_types = [float, int, float, float, float, float, float, float]
+  num_mins = [0., 0, None, 0., 0., 0., None, 0.]
+  num_maxs = [100., None, None, None, None, None, None, None]
+  num_opts = dict()
+  for i in range(len(opt_names)):
+    num_opts[opt_names[i]] = num_check(ARGS[opt_names[i]], opt_names[i],
+                                       num_types[i], num_mins[i], num_maxs[i])
+
+  # Coordinate options
+  circ_coord, circ_coord_type = coord_check(ARGS['-c'], '-c')
+  lit_coord, lit_coord_type = coord_check(ARGS['--lit-coord'], '--lit-coord')
+
+  # Checking paths
+  for opt_name in ['<info>', '<roi>']:
+    dir_check(ARGS[opt_name], opt_name)
+  out_info = ARGS['<info>']
+  out_roi = ARGS['<roi>']
+  roi_name = os.path.basename(out_roi)
+
+  # Reading seeds file
+  seeds = ARGS['-s']
+  if seeds is not None:
+    seeds = read_table(seeds)
+    try:
+      seeds = [np.array(seed, dtype=np.int32) for seed in seeds]
+    except:
+      raise NPDLError('Watershed seeds file has bad format.')
+
+  # Check evaluation metric
+  eval_metric = ARGS['--eval']
+  eval_inds = {'strength': 11, 'dist': 10, 'strength / dist': 12, 'strength / spread': 13}
+  try:
+    eval_ind = eval_inds[eval_metric]
+  except KeyError:
+    raise NPDLError('--eval option not one of the acceptable choices.')
+
+  # Loading image files
+  stat = img_read(ARGS['<stat>'])
+  if stat.shape[0] > 1:
+    raise NPDLError('Multiple maps present in stat file.')
+  stat = stat[0, :]
+
+  if ARGS['--search'] is not None:
+    search = img_read(ARGS['--search'])
+    if search.shape[0] > 1:
+      raise NPDLError('Multiple maps present in search space file.')
+    search = search[0, :]
+
+    if set(np.unique(search)) != {0, 1}:
+      logger.warning('Search space is not a binary image. Binarizing by thresholding at 0.')
+      search = (search > 0).astype(int)
+  else:
+    search = np.ones(stat.size, dtype=int)
+
+  surf_path = ARGS['<surf>']
+  surf = Surface(surf_path)
+
+  if len(set([stat.size, search.size, surf.num_verts])) > 1:
+    raise NPDLError('Input image files do not have the same number of vertices.')
+  num_verts = stat.size
+  vert_inds = np.arange(num_verts)
+
+  # Project input coordinates to surface (i.e. find closest vertex).
+  if circ_coord_type == 'coord':
+    circ_coord = surf.project_coord(circ_coord)
+  if lit_coord_type == 'coord':
+    lit_coord = surf.project_coord(lit_coord)
+
+  # ----------------------------------------------------------------------------
+  # Vertex ROI mode
+  # ----------------------------------------------------------------------------
+
+  if mode == 'vertex':
+    if num_opts['-p'] is not None:
+      roi = top_perc_roi(num_opts['-p'], stat, search)
+    elif num_opts['-n'] is not None:
+      roi = top_n_roi(num_opts['-n'], stat, search)
+    else:
+      roi = thr_roi(num_opts['-t'], stat, search)
+    rois = [roi]
+
+  # ----------------------------------------------------------------------------
+  # Cluster ROI mode
+  # ----------------------------------------------------------------------------
+
+  if mode == 'cluster':
+    if num_opts['-p'] is not None:
+      thresh = np.percentile(stat[search==1], 100. - num_opts['-p'])
+      mask = thr_roi(thresh, stat, search)
+    else:
+      mask = thr_roi(num_opts['-t'], stat, search)
+    clusters = find_clusters(mask, surf)
+    rois = []
+    for i in range(1, clusters.max()+1):
+      roi = np.zeros(num_verts)
+      roi[clusters==i] = 1
+      rois.append(roi)
+
+  # ----------------------------------------------------------------------------
+  # Watershed ROI mode
+  # ----------------------------------------------------------------------------
+
+  if mode == 'watershed':
+    if seeds is None:
+      seeds = find_peaks(stat, search, surf, num_opts['--peak-dist'], num_opts['--peak-thr'])
+      seeds = np.array(seeds).reshape((-1, 1))
+
+    rois = watershed(seeds, stat, search, surf, num_opts['--fill-rate'])
+
+    if num_opts['-p'] is not None:
+      n = int(round(.01 * perc * search.sum()))
+      rois = [top_n_roi(n, stat, roi) for roi in rois]
+    elif num_opts['-n'] is not None:
+      rois = [top_n_roi(num_opts['-n'], stat, roi) for roi in rois]
+    elif num_opts['-t'] is not None:
+      rois = [thr_roi(num_opts['-t'], stat, roi) for roi in rois]
+
+  # ----------------------------------------------------------------------------
+  # Circle ROI mode
+  # ----------------------------------------------------------------------------
+
+  if mode == 'circle':
+    if circ_coord is None:
+      masked_stat = (stat - stat.min() + 1) * search
+      circ_coord = np.argmax(masked_stat)
+    roi = surf.distance([circ_coord], max_distance=num_opts['-r'])
+    roi = (roi != np.inf).astype(int) * search
+    rois = [roi]
+
+  # ----------------------------------------------------------------------------
+  # Compute descriptive stats and save output
+  # ----------------------------------------------------------------------------
+
+  num_rois = len(rois)
+  roi_stats = [descriptive_stats(roi, stat, surf, lit_coord) for roi in rois]
+  roi_stats = np.array(roi_stats, dtype=object)
+
+  eval_stat = roi_stats[:, eval_ind]
+  if eval_metric == 'dist':
+    eval_stat = 1./eval_stat
+  ranking = np.argsort(eval_stat * -1.)
+  roi_stats = roi_stats[ranking, :]
+
+  roi_nums =  np.arange(1, num_rois+1).reshape((-1, 1))
+  roi_names = np.repeat(roi_name, (num_rois, 1))
+  roi_stats = np.hstack([roi_names, roi_nums, roi_stats])
+  roi_stats = roi_stats.astype('S20')
+
+  roi_stat_header = ('Name,Num,Size,Min.stat,Max.stat,Mean.stat,Peak.vert,' +
+                    'Peak.x,Peak.y,Peak.z,Num.comps,Spread,Lit.dist,Strength,' +
+                    'Strength.over.dist,Strength.over.spread\n')
+
+  roi_stats_str = '\n'.join([','.join(row) for row in roi_stats.tolist()]) + '\n'
+
+  if os.path.isfile(out_info):
+    f = open(out_info, 'a')
+    f.write(roi_stats_str)
+    f.close()
+  else:
+    f = open(out_info, 'a')
+    f.write(roi_stat_header + roi_stats_str)
+    f.close()
+
+  for i, idx in enumerate(ranking):
+    img_save('{}.{}.shape.gii'.format(out_roi, i+1), rois[idx], surf_path)
+
+  combined_rois = np.sum([rois[idx]*(i+1) for i, idx in enumerate(ranking)])
+  img_save('{}.all.shape.gii'.format(out_roi), combined_rois, surf_path)
+  return
+
+def num_check(val, opt_name, num_type=float, num_min=None, num_max=None):
+  """Check if option is valid number of given type and within specified (open) interval."""
+  if val is not None:
+    try:
+      val = num_type(val)
+    except ValueError:
+      raise NPDLError('{} option ({}) has bad format.'.format(opt_name, val))
+
+    if (num_min is not None and val <= num_min) or (num_max is not None and val >= num_max):
+      raise NPDLError(('{} option ({}) falls outside of ' +
+                       'required range [{}, {}].').format(opt_name, val, num_min, num_max))
+  return val
+
+def coord_check(coord, opt_name):
+  """Check if option is valid coordinate (X,Y,Z triple or vertex index)."""
+  if coord is not None:
+    coord_split = coord.split(',')
+    if len(coord_split) == 3:
+      coord = np.array([num_check(val, opt_name) for val in coord_split])
+      coord_type = 'coord'
+    elif len(coord_split) == 1:
+      coord = num_check(coord_split[0], opt_name, int, -1)
+      coord_type = 'vertex'
+    else:
+      raise NPDLError('{} option ({}) has bad format.'.format(opt_name))
+  else:
+    coord_type = None
+  return coord, coord_type
+
+def dir_check(path, opt_name):
+  above_dir = os.path.dirname(os.path.abspath(path))
+  if not os.path.isdir(above_dir):
+    raise NPDLError('Directory above output path for {} does not exist.'.format(opt_name))
+  return
+
+def top_perc_roi(perc, stat, mask):
+  """Find top X percent of vertices within a mask for a statistical map."""
+  n = int(round(.01 * perc * mask.sum()))
+  top_mask = top_n_roi(n, stat, mask)
+  return top_mask
+
+def top_n_roi(n, stat, mask):
+  """Find top N vertices within a mask for a statistical map."""
+  num_verts = stat.size
+  inds = np.arange(num_verts)
+  stat = stat[mask==1]
+  inds = inds[mask==1]
+  top_inds = inds[np.argsort(-1. * stat)[:n]]
+  top_mask = np.zeros(num_verts)
+  top_mask[top_inds] = 1
+  return top_mask
+
+def thr_roi(thr, stat, mask):
+  """Find all vertices above a threshold within a mask for a statistical map."""
+  thr_mask = ((stat >= thr) * mask).astype(int)
+  return thr_mask
+
+def count_components(mask, surf):
+  """Count connected components, i.e. clusters."""
+  clusters = find_clusters(mask, surf)
+  num_components = clusters.max()
+  return num_components
+
+def find_clusters(mask, surf):
+  """Find all clusters in mask."""
+  # Initialize clusters and pool of available vertices.
+  clusters = np.zeros(mask.size)
+  pool = np.arange(mask.size)[mask==1]
+
+  cluster_idx = 1
+  # Continue until pool is empty.
+  while pool.size > 0:
+    # Start with first vertex in pool, and grow cluster until no neighbors left in mask.
+    extension = np.array([pool[0]])
+    while True:
+      clusters[extension] = cluster_idx
+      pool = np.setdiff1d(pool, extension)
+      extension = surf.find_neighbors(extension)
+      extension = np.intersect1d(pool, extension)
+      if extension.size == 0:
+        break
+    cluster_idx += 1
+  return clusters
+
+def find_peaks(stat, mask, surf, dist, thr):
+  """Find distinct peaks in mask, separated by at least dist and above thr."""
+  # Initialize list of maxima and pool of available vertices.
+  maxima = []
+  pool = np.arange(mask.size)[mask==1]
+
+  # Continue until pool is empty.
+  while pool.size > 0:
+    peak = pool[np.argmax(stat[pool])]
+    # Quit early if global max is below threshold
+    if stat[peak] < thr:
+      break
+    # Need to make sure pool_max is real local max across entire map,
+    # in case mask cross-cuts a gradient.
+    if test_local_max(peak, stat, surf):
+      maxima.append(peak)
+    # Remove all vertices within dist of max from pool.
+    circle = np.where(surf.distance([peak], max_distance=dist) != np.inf)[0]
+    pool = np.setdiff1d(pool, circle)
+  return maxima
+
+# NOTE: unused
+def find_all_local_maxima(stat, mask, surf):
+  """Find all local maxima witin a mask."""
+  # Initialize list of maxima and pool of available vertices.
+  maxima = []
+  pool = np.arange(mask.size)[mask==1]
+
+  # Continue until pool is empty.
+  while pool.size > 0:
+    pool_max = pool[np.argmax(stat[pool])]
+    # Need to make sure pool_max is real local max across entire map,
+    # in case mask cross-cuts a gradient.
+    if test_local_max(pool_max):
+      maxima.append(pool_max)
+    extension = np.array([pool_max])
+    # Recursively remove all lower neighbors of maximum from pool.
+    # NOTE: Does this really save us any time compared to iterating over entire pool?
+    while True:
+      pool = np.setdiff1d(pool, extension)
+      extension = surf.find_neighbors(extension, lower=True, stat=stat)
+      extension = np.intersect1d(pool, extension)
+      if extension.size == 0:
+        break
+  return np.array(maxima)
+
+def test_local_max(vert, stat, surf):
+  """Test if a vertex is a local maximum."""
+  neighbors = surf.find_neighbors(vert)
+  test = (stat[neighbors] <= stat[vert]).all()
+  return test
+
+def watershed(seeds, stat, mask, surf, fill_rate=.05):
+  """Fill in regions around a set of seeds using watershed algorithm."""
+  # Initialize pool of available indices and threshold
+  pool = np.arange(stat.size)[mask==1]
+  thresh = np.max(stat[np.hstack(seeds)])
+
+  # "extensions" are the last-in vertices.
+  # They serve as the source vertices for finding new neighbors on each iteration.
+  extensions = [np.array(seed) for seed in seeds]
+
+  # Fill until pool of available vertices is empty.
+  while pool.size > 0:
+    thresh -= fill_rate
+    # Add to growing regions in order of region "strength".
+    # I.e. ties go to the biggest.
+    ranking = np.argsort([stat[seed].sum() for seed in seeds])
+    for idx in ranking:
+      while True:
+        # New verts are the neighbors of old verts that are in the pool and
+        # above the current thresh.
+        extension = surf.find_neighbors(extensions[idx])
+        extension = np.intersect1d(pool, extension)
+        extension = extension[stat[extension] >= thresh]
+        if extension.size > 0:
+          # Update growing region, extension, and pool.
+          seeds[idx] = np.hstack([seeds[idx], extension])
+          extensions[idx] = extension
+          pool = np.setdiff1d(pool, extension)
+        else:
+          break
+
+  # Convert index lists to roi masks
+  clusters = []
+  for seed in seeds:
+    cluster = np.zeros(stat.size)
+    cluster[seed] = 1
+    clusters.append(cluster)
+  return clusters
+
+def descriptive_stats(roi, stat, surf, lit_coord=None):
+  """Compute descriptive stats for ROI."""
+  inds = np.arange(roi.size)
+  roi_inds = inds[roi==1]
+
+  # Size (in vertices), min, max, mean statistical value
+  roi_size = roi_inds.size
+  roi_min, roi_max, roi_mean = [func(stat[roi_inds])
+                                for func in np.min, np.max, np.mean]
+
+  # Peak vertex and coordinate
+  peak_vert = inds[np.argmax(stat[roi_inds])]
+  peak_x, peak_y, peak_z = surf.coords[peak_vert, :]
+
+  # Number of connected components
+  num_components = count_components(roi, surf)
+
+  # ROI "spread" (average distance from peak vertex, weighted by stat)
+  spread = np.mean(surf.distance([peak_vert], roi_inds))
+  spread = np.sum(spread * stat[roi_inds])/np.sum(stat[roi_inds])
+
+  # Distance from literature coordinate (weighted average as above)
+  if lit_coord is not None:
+    dist_from_lc = surf.distance([lit_coord], roi_inds)
+    dist_from_lc = np.sum(dist_from_lc * stat[roi_inds])/np.sum(stat[roi_inds])
+  else:
+    dist_from_lc = np.nan
+
+  # Composite evaluation metrics
+  strength = np.sum(stat[roi_inds])
+  strength_over_dist = strength / dist_from_lc
+  strength_over_spread = strength / spread
+
+  stats = (roi_size, roi_min, roi_max, roi_mean, peak_vert, peak_x, peak_y,
+           peak_z, num_components, spread, dist_from_lc, strength,
+           strength_over_dist, strength_over_spread)
+  return stats
+
+if __name__ == '__main__':
+  try:
+    main()
+  except NPDLError as e:
+    logger.error(e)
+    sys.exit(1)
+  sys.exit(0)
