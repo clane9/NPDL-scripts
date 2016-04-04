@@ -97,14 +97,14 @@ class Surface(object):
                        'or is not a valid Gifti file.').format(surf))
 
     self.coords, self.faces = [surf.darrays[i].data for i in 0, 1]
-    surf.coords = surf.coords.astype(np.float64)
-    surf.faces = surf.coords.astype(np.int32)
+    self.coords = self.coords.astype(np.float64)
+    self.faces = self.faces.astype(np.int32)
 
     self.num_verts = self.coords.shape[0]
     self.neighbors = self.construct_neighbors(max_neighbors)
     return
 
-  def distance(src, trg=None, max_distance=None):
+  def distance(self, src, trg=None, max_distance=None):
     """Compute minimum geodesic distance between source vertices and target
     vertices using gdist library.
     """
@@ -113,7 +113,9 @@ class Surface(object):
       trg = np.array(trg, dtype=np.int32)
     if max_distance is not None:
       max_distance = np.float64(max_distance)
-    distances = gdist.compute_gdist(self.coords, self.faces, src, trg, max_distance)
+      distances = gdist.compute_gdist(self.coords, self.faces, src, trg, max_distance)
+    else:
+      distances = gdist.compute_gdist(self.coords, self.faces, src, trg)
     return distances
 
   def construct_neighbors(self, max_neighbors):
@@ -152,8 +154,8 @@ class Surface(object):
   def project_coord(self, coord):
     """Project a coordinate onto the surface."""
     coord = np.array(coord).reshape(1, 3)
-    dists = np.sum((self.coords - coord)**2, axis=1)
-    vertex = np.argmin(dists)
+    sqrd_dists = np.sum((self.coords - coord)**2, axis=1)
+    vertex = np.argmin(sqrd_dists)
     return vertex
 
 def img_read(img_path):
@@ -175,11 +177,11 @@ def img_read(img_path):
     img = load_gii(img_path)
   return img
 
-def check_img_path(img_path):
+def check_img_path(img_path, exists=True):
   """Check image file extention."""
   img_path = img_path.strip()
-  if not os.path.isfile(img_path):
-    raise NPDLError('Image file ({}) does not exist.'.format(img))
+  if exists and not os.path.isfile(img_path):
+    raise NPDLError('Image file ({}) does not exist.'.format(img_path))
   ext_patt = r'(\.nii(\.gz)?|\.gii)$'
   img_ext = re.search(ext_patt, img_path)
   if img_ext is None:
@@ -233,7 +235,7 @@ def load_gii(img_path):
   return img
 
 def img_save(img_path, img, surf_path=None):
-  img_path, img_type = check_img_path(img_path)
+  img_path, img_type = check_img_path(img_path, exists=False)
   if img_type in {'.nii', '.nii.gz'}:
     save_nii(img_path, img)
   else:
@@ -243,7 +245,10 @@ def img_save(img_path, img, surf_path=None):
   return
 
 def save_nii(img_path, img):
-  img = img.T.reshape((img.shape[0], 1, 1, img.shape[1]))
+  if len(img.shape) == 1:
+    img = img.reshape((1, -1))
+  img = img.T
+  img = img.reshape((img.shape[0], 1, 1, img.shape[1]))
   img = nib.Nifti1Image(img, np.eye(4))
   nib.save(img, img_path)
   return
@@ -253,7 +258,7 @@ def save_gii(img_path, img, surf_path):
   tmp_img_path = '{}/img.nii.gz'.format(tmpdir)
   save_nii(tmp_img_path, img)
   status = subp.call(('wb_command -metric-convert -from-nifti ' +
-                      '{} {} {}').format(tmp_img_path, surf_path, img))
+                      '{} {} {}').format(tmp_img_path, surf_path, img_path), shell=True)
   if status != 0:
     raise NPDLError('Failed to save Gifti file: {}.'.format(img_path))
   return
