@@ -4,7 +4,7 @@
 Usage:
   make_roi vertex [options] (-p <perc> | -n <N> | -t <thr>) <stat> <info> <roi>
   make_roi cluster [options] (-p <perc> | -t <thr>) <stat> <info> <roi>
-  make_roi watershed [options] [-p <perc> | -n <N> | -t <thr>] [-s <seeds>] <stat> <info> <roi>
+  make_roi watershed [options] [-p <perc> | -n <N> | -t <thr>] [-s <seeds> | --man-seeds] <stat> <info> <roi>
   make_roi circle [options] -r <rad> (-c <coord> | <stat>) <info> <roi>
 
 Arguments:
@@ -23,13 +23,11 @@ Arguments:
                        results in ROI containing top 100 vertices.)
   -t <thr>             Raw stat threshold for ROI. (E.g. cluster -t 3.1 results
                        in all clusters above 3.1.)
-  -d <dist>            Minimum distance (in mm) between distinct peaks. Only
-                       relevant in watershed mode. (E.g. watershed -d 30 means
-                       that the seed peaks for distinct watershed regions will
-                       be at least 30mm apart.)
   -s <seeds>           Path to text file containing seed vertices for
                        watershed. One row per seed region, vertices separated
                        by spaces within a row. (E.g. -s seeds.txt.)
+  --man-seeds          Instead of providing a seed file in watershed mode, pick
+                       the seed vertices interactively using tksurfer.
   -r <rad>             Radius of circular ROI. Only relevant in circle mode.
   -c <coord>           Center coordinate of circular ROI. Coordinate can be
                        X,Y,Z or vertex index. Only relevant in circle mode.
@@ -43,34 +41,35 @@ Arguments:
                        be created.
   <roi>                Path to output ROI, excluding file extension. This will
                        determine the prefix of output metric Gifti ROI files
-                       (E.g. sub/rois/IFG.lh --> sub/rois/IFG.lh.1.shape.gii).
+                       (E.g. sub/rois/IFG.lh --> sub/rois/IFG.lh.shape.gii).
                        Importantly, the basename will also be the first column
                        in the info file, so make it unique.
 
 Options:
-  --sub <subject>      Freesurfer subject in SUBJECTS_DIR [default: 32k_fs_LR].
+  --fs-sub <subject>   Freesurfer subject in SUBJECTS_DIR [default: 32k_fs_LR].
   --hemi <hemi>        Hemisphere (lh or rh) [default: lh].
   --surf <surface>     Surface name [default: midthickness].
   --search <mask>      Seach space mask in Nifti or metric Gifti format. Must
                        be in same space as stat map and surface. (E.g. --search
-                       lh.IFG.shape.gii.)
+                       lh.IFG.shape.gii.) [default: cortex]
   --lit-coord <coord>  Measure and report distance from ROI peak to literature
                        or group average coordinate. Coordinate can be X,Y,Z or
                        vertex index (E.g. --lit-coord=20.,19.,-5.).
-  --peak-dist <dist>   Minimum distance between distinct peaks in watershed
-                       mode. Can be overridden by including a seed file.
-                       [default: 30]
-  --peak-thr <thr>     Minimum threshold for a local maxima to count as a peak
-                       in watershed mode. Can be overridden by including a seed
-                       file. [default: 2.3]
-  --fill-rate <dec>    Amount to decrease watershed threshold by on each
-                       iteration. [default: .05]
+  --peak-thr <thr>     Threshold for finding distinct peaks of activation in
+                       watershed mode. Each connected cluster above this
+                       threshold will give rise to a distinct ROI. Can be
+                       overridden by including a seed file or giving
+                       the --man-seeds flag. [default: 3.0]
   --eval <metric>      Metric to use when weighing ROI candidates. Options are
                        "strength" (sum of stat values), "dist" (weighted
                        average distance from literature coord to ROI),
                        "strength / dist" (strength / distance), or "strength /
                        spread" (strength / weighted average distance from ROI
                        peak to all other ROI vertices) [default: strength].
+  --select <mode>      ROI selection mode. Options are: "best" (the single best
+                       ROI will be produced), "pick" (you will choose the ROI
+                       from the available options interactively), or "all" (all
+                       available ROIs will be produced) [default: best].
   -h, --help           Display this message.
 """
 
@@ -82,8 +81,10 @@ from datetime import datetime as dt
 import numpy as np
 import os
 import re
+from shutil import rmtree
 import subprocess as sp
 import sys
+import tempfile as tf
 
 from npdl_utils import Logger, NPDLError, Surface, img_read, img_save, read_table, init_table
 
@@ -91,6 +92,7 @@ logger = Logger(global_log=None, local_log=None, pid=os.getpid())
 
 def main():
   """Main function"""
+  global logger
 
   # ----------------------------------------------------------------------------
   # Read command line and check argument formats
@@ -103,10 +105,10 @@ def main():
       break
 
   # Numerical options
-  opt_names = ['-p', '-n', '-t', '-r', '-d', '--peak-dist', '--peak-thr', '--fill-rate']
-  num_types = [float, int, float, float, float, float, float, float]
-  num_mins = [0., 0, None, 0., 0., 0., None, 0.]
-  num_maxs = [100., None, None, None, None, None, None, None]
+  opt_names = ['-p', '-n', '-t', '-r', '--peak-thr']
+  num_types = [float, int, float, float, float]
+  num_mins = [0., 0, None, 0., None]
+  num_maxs = [100., None, None, None, None]
   num_opts = dict()
   for i in range(len(opt_names)):
     num_opts[opt_names[i]] = num_check(ARGS[opt_names[i]], opt_names[i],
@@ -131,6 +133,8 @@ def main():
       seeds = [np.array(seed, dtype=np.int32) for seed in seeds]
     except:
       raise NPDLError('Watershed seeds file has bad format.')
+  elif ARGS['--man-seeds']:
+    seeds = 'manual'
 
   # Check evaluation metric
   eval_metric = ARGS['--eval']
@@ -139,18 +143,25 @@ def main():
     eval_ind = eval_inds[eval_metric]
   except KeyError:
     raise NPDLError('--eval option not one of the acceptable choices.')
+  if eval_ind in {10, 12} and lit_coord is None:
+    raise NPDLError('A literature coordinate is required for evaluation metrics depending on distance.')
+
+  # ROI selection mode
+  select_mode = ARGS['--select']
+  if select_mode not in {'best', 'pick', 'all'}:
+    raise NPDLError('--select option not one of the acceptable choices.')
 
   # Load surface
   subjects_dir = os.environ['SUBJECTS_DIR']
-  sub, hemi, surf_name = ARGS['--sub'], ARGS['--hemi'], ARGS['--surf']
+  sub, hemi, surf_name = ARGS['--fs-sub'], ARGS['--hemi'], ARGS['--surf']
   if not os.path.isdir('{}/{}'.format(subjects_dir, sub)):
     raise NPDLError('Subject: {} does not exist in SUBJECTS_DIR: {}.'.format(sub, subjects_dir))
   surf_path = '{}/{}/surf/{}.{}.surf.gii'.format(subjects_dir, sub, hemi, surf_name)
   surf = Surface(surf_path)
 
-  # Loading metric files
-  stat = ARGS['<stat>']
-  if stat is not None:
+  # Loading stat map.
+  stat_path = ARGS['<stat>']
+  if stat_path is not None:
     stat = img_read(stat)
     if stat.shape[0] > 1:
       raise NPDLError('Multiple maps present in stat file.')
@@ -158,19 +169,23 @@ def main():
   else:
     # Need placeholder in case we're in circle mode.
     stat = np.ones(surf.num_verts)
+  # Used in a few places for finding accurate peaks after masking
+  shift_stat = stat - stat.min() + 1.0
 
-  if ARGS['--search'] is not None:
-    search = img_read(ARGS['--search'])
-    if search.shape[0] > 1:
-      raise NPDLError('Multiple maps present in search space file.')
-    search = search[0, :]
+  # Load search space.
+  search_path = ARGS['--search']
+  if search_path == 'cortex':
+    search_path = '{}/{}/label/masks/{}.cortex.shape.gii'.format(subjects_dir, sub, hemi)
+  search = img_read(search_path)
+  if search.shape[0] > 1:
+    raise NPDLError('Multiple maps present in search space file.')
+  search = search[0, :]
 
-    if set(np.unique(search)) != {0, 1}:
-      logger.warning('Search space is not a binary image. Binarizing by thresholding at 0.')
-      search = (search > 0).astype(int)
-  else:
-    search = np.ones(stat.size, dtype=int)
+  if set(np.unique(search)) != {0, 1}:
+    logger.warning('Search space is not a binary image. Binarizing by thresholding at 0.')
+    search = (search > 0).astype(int)
 
+  # Check that all surface files have the same # of vertices.
   if len(set([stat.size, search.size, surf.num_verts])) > 1:
     raise NPDLError('Input image files do not have the same number of vertices.')
   num_verts = stat.size
@@ -206,8 +221,7 @@ def main():
     clusters, num_clusters = find_clusters(mask, surf)
     rois = []
     for i in range(1, num_clusters+1):
-      roi = np.zeros(num_verts)
-      roi[clusters==i] = 1
+      roi = (clusters==i).astype(int)
       rois.append(roi)
 
   # ----------------------------------------------------------------------------
@@ -220,8 +234,15 @@ def main():
       raise NPDLError('Watershed procedure requires a connected search space.')
 
     if seeds is None:
-      peaks = find_peaks(stat, search, surf, num_opts['--peak-dist'], num_opts['--peak-thr'])
-      seeds = [np.array([peak]) for peak in peaks]
+      cluster_mask = thr_roi(num_opts['--peak-thr'], stat, search)
+      clusters, num_clusters = find_clusters(cluster_mask, surf)
+      seeds = []
+      for i in range(1, num_clusters+1):
+        masked_stat = shift_stat * (clusters==i).astype(int)
+        seed = np.array([np.argmax(masked_stat)])
+        seeds.append(seed)
+    elif seeds == 'manual':
+      seeds = pick_seeds(sub, hemi, search_path, stat_path)
 
     if num_opts['-t'] is None:
       fill_stop = 0.0
@@ -242,17 +263,17 @@ def main():
 
   if mode == 'circle':
     if circ_coord is None:
-      masked_stat = (stat - stat.min() + 1) * search
+      masked_stat = shift_stat * search
       circ_coord = np.argmax(masked_stat)
     roi = surf.distance([circ_coord], max_distance=num_opts['-r'])
     roi = (roi != np.inf).astype(int) * search
     rois = [roi]
 
   # ----------------------------------------------------------------------------
-  # Compute descriptive stats and save output
+  # Compute descriptive stats and make ROI choice.
   # ----------------------------------------------------------------------------
 
-  # Save descriptive info.
+  # Compute descriptive stats
   num_rois = len(rois)
   roi_stats = [descriptive_stats(roi, stat, surf, lit_coord, circ_coord) for roi in rois]
   roi_stats = np.array(roi_stats, dtype=object)
@@ -261,17 +282,34 @@ def main():
   if eval_metric == 'dist':
     eval_stat = 1./eval_stat
   ranking = np.argsort(eval_stat * -1.)
+  rois = rois[ranking]
   roi_stats = roi_stats[ranking, :]
 
-  roi_nums =  np.arange(1, num_rois+1).reshape((-1, 1))
+  roi_nums = np.arange(1, num_rois+1).reshape((-1, 1))
+  roi_stats = np.hstack([roi_nums, roi_stats])
+
+  if select_mode == 'pick':
+    choice = pick_roi(sub, hemi, rois, roi_stats, search_path, stat_path, surf_path)
+    rois = rois[[choice]]
+    roi_stats = roi_stats[[choice], :]
+  elif select_mode == 'best':
+    rois = rois[[0]]
+    roi_stats = roi_stats[[0], :]
+
+  # ----------------------------------------------------------------------------
+  # Save output.
+  # ----------------------------------------------------------------------------
+
+  roi_stat_header = ('Name,Search.path,Stat.path,Rank,Size,Min.stat,Max.stat,' +
+                     'Mean.stat,Peak.vert,Peak.x,Peak.y,Peak.z,Num.comps,Spread,' +
+                     'Lit.dist,Strength,Strength.over.dist,Strength.over.spread\n')
+
+  num_rois = len(rois)
   roi_names = np.repeat(roi_name, num_rois).reshape((-1, 1))
-  roi_stats = np.hstack([roi_names, roi_nums, roi_stats])
+  stat_paths = np.repeat(stat_path, num_rois).reshape((-1, 1))
+  search_paths = np.repeat(search_path, num_rois).reshape((-1, 1))
+  roi_stats = np.hstack(roi_names, stat_paths, search_paths, roi_stats)
   roi_stats = roi_stats.astype('S20')
-
-  roi_stat_header = ('Name,Num,Size,Min.stat,Max.stat,Mean.stat,Peak.vert,' +
-                    'Peak.x,Peak.y,Peak.z,Num.comps,Spread,Lit.dist,Strength,' +
-                    'Strength.over.dist,Strength.over.spread\n')
-
   roi_stats_str = '\n'.join([','.join(row) for row in roi_stats.tolist()]) + '\n'
 
   if os.path.isfile(out_info):
@@ -283,28 +321,20 @@ def main():
     f.write(roi_stat_header + roi_stats_str)
     f.close()
 
-  dev_null = open('/dev/null', 'a')
+  # Save metric mask and possibly an annotation.
+  for i in range(num_rois):
+    if num_rois > 1:
+      roi_path = '{}.{}.shape.gii'.format(out_roi, i+1)
+    else:
+      roi_path = '{}.shape.gii'.format(out_roi)
+    img_save(roi_path, rois[i], surf_path)
 
-  # Save metric masks and labels/annotations.
-  for i, idx in enumerate(ranking):
-    img_save('{}.{}.shape.gii'.format(out_roi, i+1), rois[idx], surf_path)
-    rc = sp.call(('mri_cor2label --i ./{}.{}.shape.gii --id 1 --l ./{}.{}.label ' +
-                  '--surf {} {}').format(out_roi, i+1, out_roi, i+1, sub, hemi),
-                  stdout=dev_null, stderr=dev_null, shell=True)
-    if rc != 0:
-      logger.warning('mri_cor2label failed.')
-
-  if len(rois) > 1:
-    combined_rois = np.array([rois[idx]*(i+1) for i, idx in enumerate(ranking)])
-    combined_rois = np.sum(combined_rois, axis=0)
-    img_save('{}.all.shape.gii'.format(out_roi), combined_rois, surf_path)
-
-    lut = '{}/etc/ROIColorLUT.txt'.format(os.environ['NPDL_SCRIPT_DIR'])
-    rc = sp.call(('mris_seg2annot --seg ./{}.all.shape.gii --ctab {} --s {} --h {} ' +
-                  '--o ./{}.all.annot').format(out_roi, lut, sub, hemi, out_roi),
-                  stdout=dev_null, stderr=dev_null, shell=True)
-    if rc != 0:
-      logger.warning('mris_seg2annot failed.')
+  if num_rois > 1:
+    combined_rois = combine_rois(rois)
+    seg_path = '{}.all.shape.gii'.format(out_roi)
+    annot_path = '{}.all.annot'.format(out_roi)
+    img_save(seg_path, combined_rois, surf_path)
+    seg2annot(seg_path, annot_path, sub, hemi)
   return
 
 def num_check(val, opt_name, num_type=float, num_min=None, num_max=None):
@@ -364,11 +394,6 @@ def thr_roi(thr, stat, mask):
   thr_mask = ((stat >= thr) * mask).astype(int)
   return thr_mask
 
-def count_components(mask, surf):
-  """Count connected components, i.e. clusters."""
-  clusters, num_clusters = find_clusters(mask, surf)
-  return num_clusters
-
 def find_clusters(mask, surf):
   """Find all clusters in mask."""
   # Initialize clusters and pool of available vertices.
@@ -390,57 +415,127 @@ def find_clusters(mask, surf):
         break
   return clusters, cluster_idx
 
-def find_peaks(stat, mask, surf, dist, thr):
-  """Find distinct peaks in mask, separated by at least dist and above thr."""
-  # Initialize list of maxima and pool of available vertices.
-  maxima = []
-  pool = np.arange(mask.size)[mask==1]
+def count_components(mask, surf):
+  """Count connected components, i.e. clusters."""
+  clusters, num_clusters = find_clusters(mask, surf)
+  return num_clusters
 
-  # Continue until pool is empty.
-  while pool.size > 0:
-    peak = pool[np.argmax(stat[pool])]
-    # Quit early if global max is below threshold
-    if stat[peak] < thr:
-      break
-    # Need to make sure pool_max is real local max across entire map,
-    # in case mask cross-cuts a gradient.
-    if test_local_max(peak, stat, surf):
-      maxima.append(peak)
-    # Remove all vertices within dist of max from pool.
-    circle = np.where(surf.distance([peak], max_distance=dist) != np.inf)[0]
-    pool = np.setdiff1d(pool, circle)
-  return maxima
+def pick_seeds(sub, hemi, search_path, stat_path):
+  """Pick seed vertices manually using tksurfer."""
+  tmpdir = tf.mkdtemp(prefix='seeds-')
+  label_path = '{}/search.label'.format(tmpdir)
+  cor2label(search_path, label_path, sub, hemi)
 
-# NOTE: unused
-def find_all_local_maxima(stat, mask, surf):
-  """Find all local maxima witin a mask."""
-  # Initialize list of maxima and pool of available vertices.
-  maxima = []
-  pool = np.arange(mask.size)[mask==1]
+  fmin, fmax = 1.65, 3.3 # for zstat, p=.05 -> p=.0005
+  command = ('tksurfer {} {} inflated -label {} -label-outline -overlay {} ' +
+             '-fminmax {} {}').format(sub, hemi, label_path, stat_path, fmin, fmax)
+  proc = sp.Popen(command.split(), stdout=sp.PIPE, stderr=sp.PIPE)
 
-  # Continue until pool is empty.
-  while pool.size > 0:
-    pool_max = pool[np.argmax(stat[pool])]
-    # Need to make sure pool_max is real local max across entire map,
-    # in case mask cross-cuts a gradient.
-    if test_local_max(pool_max):
-      maxima.append(pool_max)
-    extension = np.array([pool_max])
-    # Recursively remove all lower neighbors of maximum from pool.
-    # NOTE: Does this really save us any time compared to iterating over entire pool?
+  seeds = []
+  i = 1
+  cont = True
+  while cont:
     while True:
-      pool = np.setdiff1d(pool, extension)
-      extension = surf.find_neighbors(extension, lower=True, stat=stat)
-      extension = np.intersect1d(pool, extension)
-      if extension.size == 0:
+      seed = raw_input('Seed {} verts: '.format(i))
+      if len(seed.strip()) == 0:
+        cont = False
         break
-  return np.array(maxima)
+      try:
+        seed = np.array(map(int, seed.strip().split()))
+      except ValueError:
+        print('ERROR: Must be space-separated list of vertex numbers.')
+        continue
+      seeds.append(seed)
+      i += 1
+      break
 
-def test_local_max(vert, stat, surf):
-  """Test if a vertex is a local maximum."""
-  neighbors = surf.find_neighbors(vert)
-  test = (stat[neighbors] <= stat[vert]).all()
-  return test
+  proc.terminate()
+  rmtree(tmpdir)
+  return seeds
+
+def cor2label(mask_path, label_path, sub, hemi):
+  """Wrapper for mri_cor2label."""
+  mask_path = os.path.abspath(mask_path)
+  label_path = os.path.abspath(label_path)
+  dev_null = open('/dev/null', 'a')
+  rc = sp.call('mri_cor2label --i {} --id 1 --l {} --surf {} {}'.format(mask_path, label_path, sub, hemi),
+               stdout=dev_null, stderr=dev_null, shell=True)
+  if rc != 0:
+    logger.warning('mri_cor2label failed')
+  return
+
+def pick_roi(sub, hemi, rois, roi_stats, search_path, stat_path, surf_path):
+  """Choose ROI from a set of options using tksurfer."""
+  tmpdir = tf.mkdtemp(prefix='seeds-')
+  label_path = '{}/search.label'.format(tmpdir)
+  cor2label(search_path, label_path, sub, hemi)
+
+  combined_rois = combine_rois(rois)
+  seg_path = '{}/rois.shape.gii'.format(tmpdir)
+  annot_path = '{}/rois.annot'.format(tmpdir)
+  img_save(seg_path, combined_rois, surf_path)
+  seg2annot(seg_path, annot_path, sub, hemi)
+
+  fmin, fmax = 1.65, 3.3 # for zstat, p=.05 -> p=.0005
+  command = ('tksurfer {} {} inflated -label {} -label-outline -overlay {} ' +
+             '-fminmax {} {} -annotation {}').format(sub, hemi, label_path,
+                                                     stat_path, fmin, fmax,
+                                                     annot_path)
+  proc = sp.Popen(command.split(), stdout=sp.PIPE, stderr=sp.PIPE)
+
+  header = ['Num', 'Size', 'Min.stat', 'Mean.stat' 'Peak.X', 'Peak.Y',
+            'Peak.Z', 'Num.comps', 'Spread', 'Lit.dist', 'Strength']
+  table_inds = range(3) + [4] + range(6, 13)
+  roi_stats = roi_stats[:, table_inds]
+  col_types = ['d', 'd', '.2f', '.2f', '.0f', '.0f', '.0f', 'd', '.0f', '.0f', '.0f']
+  print_formatted_table(roi_stats, col_types, header)
+
+  num_rois = roi_stats.shape[0]
+  while True:
+    choice = raw_input('ROI choice: ')
+    if not choice.isdigit() or int(choice) in range(1, num_rois+1):
+      print('ERROR: choice must be between 1 and {}'.format(num_rois))
+    else:
+      choice = int(choice)
+      break
+
+  proc.terminate()
+  rmtree(tmpdir)
+  return choice
+
+def seg2annot(seg_path, annot_path, sub, hemi):
+  """Wrapper for mris_seg2annot."""
+  seg_path = os.path.abspath(seg_path)
+  annot_path = os.path.abspath(annot_path)
+  lut = '{}/etc/ROIColorLUT.txt'.format(os.environ['NPDL_SCRIPT_DIR'])
+  dev_null = open('/dev/null', 'a')
+  rc = sp.call(('mris_seg2annot --seg {} --ctab {} --s {} --h {} ' +
+                '--o {}').format(seg_path, lut, sub, hemi, annot_path),
+                stdout=dev_null, stderr=dev_null, shell=True)
+  if rc != 0:
+    logger.warning('mris_seg2annot failed.')
+  return
+
+def combine_rois(rois):
+  """Combine list of ROIs into a single map."""
+  combined_rois = np.array([rois[i]*(i+1) for i in range(rois.size)])
+  combined_rois = np.sum(combined_rois, axis=0)
+  return combined_rois
+
+def print_formatted_table(table, table_formats, header=None):
+  """Print a table with formatted, left-aligned columns."""
+  if type(table) == np.ndarray:
+    table = table.tolist()
+  table_formats = ['{{0:{}}}'.format(tf) for tf in table_formats]
+  table = [[tf.format(val) for tf, val in zip(table_formats, row)] for row in table]
+  if header is not None:
+    table = [header] + table
+  entry_sizes = np.array([[len(entry) for entry in row] for row in table])
+  col_widths = [np.max(entry_sizes[:, i])+1 for i in range(entry_sizes.shape[1])]
+  row_format = ' '.join(['{{{}:<{}s}}'.format(i, cw) for i, cw in enumerate(col_widths)])
+  table_str = '\n'.join([row_format.format(*row) for row in table]) + '\n'
+  print(table_str)
+  return
 
 def watershed(seeds, stat, mask, surf, fill_rate=.05, fill_stop=None):
   """Fill in regions around a set of seeds using watershed algorithm."""
