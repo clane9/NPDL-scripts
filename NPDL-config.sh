@@ -14,7 +14,7 @@ set -a
 # - Freesurfer (5.3.0)
 # - HCP Workbench (1.1.1)
 # - Mricron (2014-08-04)
-# - Python (2.7) [docopt, matplotlib, nibabel, numpy]
+# - Python (2.7) [docopt, matplotlib, nibabel, numpy, gdist]
 # - Imagemagick
 
 # Optional:
