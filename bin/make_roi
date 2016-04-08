@@ -85,6 +85,7 @@ from shutil import rmtree
 import subprocess as sp
 import sys
 import tempfile as tf
+import threading as th
 
 from npdl_utils import Logger, NPDLError, Surface, img_read, img_save, read_table, init_table
 
@@ -162,7 +163,7 @@ def main():
   # Loading stat map.
   stat_path = ARGS['<stat>']
   if stat_path is not None:
-    stat = img_read(stat)
+    stat = img_read(stat_path)
     if stat.shape[0] > 1:
       raise NPDLError('Multiple maps present in stat file.')
     stat = stat[0, :]
@@ -248,8 +249,9 @@ def main():
       fill_stop = 0.0
     else:
       fill_stop = num_opts['-t']
-
-    rois = watershed(seeds, stat, search, surf, num_opts['--fill-rate'], fill_stop)
+    
+    fill_rate = .05
+    rois = watershed(seeds, stat, search, surf, fill_rate, fill_stop)
 
     if num_opts['-p'] is not None:
       n = int(round(.01 * perc * search.sum()))
@@ -274,8 +276,10 @@ def main():
   # ----------------------------------------------------------------------------
 
   # Compute descriptive stats
-  num_rois = len(rois)
-  roi_stats = [descriptive_stats(roi, stat, surf, lit_coord, circ_coord) for roi in rois]
+  rois = np.array(rois)
+  num_rois = rois.shape[0]
+  roi_stats = [descriptive_stats(rois[i, :], stat, surf, lit_coord, circ_coord) 
+               for i in range(num_rois)]
   roi_stats = np.array(roi_stats, dtype=object)
 
   eval_stat = roi_stats[:, eval_ind]
@@ -304,13 +308,12 @@ def main():
                      'Mean.stat,Peak.vert,Peak.x,Peak.y,Peak.z,Num.comps,Spread,' +
                      'Lit.dist,Strength,Strength.over.dist,Strength.over.spread\n')
 
-  num_rois = len(rois)
+  num_rois = rois.shape[0]
   roi_names = np.repeat(roi_name, num_rois).reshape((-1, 1))
-  stat_paths = np.repeat(stat_path, num_rois).reshape((-1, 1))
-  search_paths = np.repeat(search_path, num_rois).reshape((-1, 1))
-  roi_stats = np.hstack(roi_names, stat_paths, search_paths, roi_stats)
-  roi_stats = roi_stats.astype('S20')
-  roi_stats_str = '\n'.join([','.join(row) for row in roi_stats.tolist()]) + '\n'
+  stat_paths = np.repeat(os.path.abspath(stat_path), num_rois).reshape((-1, 1))
+  search_paths = np.repeat(os.path.abspath(search_path), num_rois).reshape((-1, 1))
+  roi_stats = np.hstack([roi_names, stat_paths, search_paths, roi_stats])
+  roi_stats_str = '\n'.join([','.join(map(str,row)) for row in roi_stats.tolist()]) + '\n'
 
   if os.path.isfile(out_info):
     f = open(out_info, 'a')
@@ -327,7 +330,7 @@ def main():
       roi_path = '{}.{}.shape.gii'.format(out_roi, i+1)
     else:
       roi_path = '{}.shape.gii'.format(out_roi)
-    img_save(roi_path, rois[i], surf_path)
+    img_save(roi_path, rois[i, :], surf_path)
 
   if num_rois > 1:
     combined_rois = combine_rois(rois)
@@ -429,7 +432,8 @@ def pick_seeds(sub, hemi, search_path, stat_path):
   fmin, fmax = 1.65, 3.3 # for zstat, p=.05 -> p=.0005
   command = ('tksurfer {} {} inflated -label {} -label-outline -overlay {} ' +
              '-fminmax {} {}').format(sub, hemi, label_path, stat_path, fmin, fmax)
-  proc = sp.Popen(command.split(), stdout=sp.PIPE, stderr=sp.PIPE)
+  proc = PopThread(command)
+  proc.start()
 
   seeds = []
   i = 1
@@ -464,9 +468,25 @@ def cor2label(mask_path, label_path, sub, hemi):
     logger.warning('mri_cor2label failed')
   return
 
+class PopThread(th.Thread):
+  def __init__(self, command):
+    self.p = None
+    self.command = command.split()
+    th.Thread.__init__(self)
+    return
+
+  def run(self):
+    self.p = sp.Popen(self.command, stdout=sp.PIPE, stderr=sp.PIPE)
+    return
+
+  def terminate(self):
+    if self.p is not None:
+      self.p.terminate()
+    return
+
 def pick_roi(sub, hemi, rois, roi_stats, search_path, stat_path, surf_path):
   """Choose ROI from a set of options using tksurfer."""
-  tmpdir = tf.mkdtemp(prefix='seeds-')
+  tmpdir = tf.mkdtemp(prefix='pick-roi-')
   label_path = '{}/search.label'.format(tmpdir)
   cor2label(search_path, label_path, sub, hemi)
 
@@ -481,9 +501,10 @@ def pick_roi(sub, hemi, rois, roi_stats, search_path, stat_path, surf_path):
              '-fminmax {} {} -annotation {}').format(sub, hemi, label_path,
                                                      stat_path, fmin, fmax,
                                                      annot_path)
-  proc = sp.Popen(command.split(), stdout=sp.PIPE, stderr=sp.PIPE)
+  proc = PopThread(command)
+  proc.start()
 
-  header = ['Num', 'Size', 'Min.stat', 'Mean.stat' 'Peak.X', 'Peak.Y',
+  header = ['Num', 'Size', 'Min.stat', 'Mean.stat', 'Peak.X', 'Peak.Y',
             'Peak.Z', 'Num.comps', 'Spread', 'Lit.dist', 'Strength']
   table_inds = range(3) + [4] + range(6, 13)
   roi_stats = roi_stats[:, table_inds]
@@ -493,10 +514,10 @@ def pick_roi(sub, hemi, rois, roi_stats, search_path, stat_path, surf_path):
   num_rois = roi_stats.shape[0]
   while True:
     choice = raw_input('ROI choice: ')
-    if not choice.isdigit() or int(choice) in range(1, num_rois+1):
+    if not (choice.isdigit() and int(choice) in range(1, num_rois+1)):
       print('ERROR: choice must be between 1 and {}'.format(num_rois))
     else:
-      choice = int(choice)
+      choice = int(choice) - 1
       break
 
   proc.terminate()
@@ -518,8 +539,7 @@ def seg2annot(seg_path, annot_path, sub, hemi):
 
 def combine_rois(rois):
   """Combine list of ROIs into a single map."""
-  combined_rois = np.array([rois[i]*(i+1) for i in range(rois.size)])
-  combined_rois = np.sum(combined_rois, axis=0)
+  combined_rois = np.sum(rois * np.arange(1, rois.shape[0]+1).reshape((-1, 1)), axis=0)
   return combined_rois
 
 def print_formatted_table(table, table_formats, header=None):
