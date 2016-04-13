@@ -43,14 +43,14 @@ PATH=$PATH:$WB_DIR/bin_rh_linux64
 
 # Mricron setup.
 MRICRON_DIR=
-PATH=$PATH:$MRICRON_DIR/2014-08-04
+PATH=$PATH:$MRICRON_DIR
 
 # Script-specific setup
 # ---------------------
 
 # General settings
 if [[ -z $NPDL_SCRIPT_DIR ]]; then
-  NPDL_SCRIPT_DIR=$(readlink -m ${0%/*})
+  NPDL_SCRIPT_DIR=$(cd $(dirname ${BASH_SOURCE[0]}) && pwd)
 fi
 PATH=$PATH:$NPDL_SCRIPT_DIR/bin
 source $NPDL_SCRIPT_DIR/lib/npdl_funcs.sh

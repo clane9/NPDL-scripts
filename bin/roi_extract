@@ -663,15 +663,15 @@ class Events(object):
   def check_event_type(self, cond, center_cont=True, norm_cont=True):
     """Check whether event is a dummy or continuous, and optionally center."""
     cond_mask = (self.event_table[:, 1] == cond)
-    heights = self.event_table[cond_mask, 4]
+    heights = self.event_table[cond_mask, 4].astype(float)
     if set(np.unique(heights)) <= {1., 0.}:
       event_type = 'dummy'
     else:
       event_type = 'continuous'
       if center_cont:
-        heights = heights - np.mean(heights)
+        heights -= np.mean(heights)
       if norm_cont:
-        heights = heights/np.std(heights)
+        heights /= np.std(heights)
       self.event_table[cond_mask, 4] = heights
     return event_type
 
@@ -866,8 +866,11 @@ def save_psc_data(psc, peak, counts, rel_ons, durs, peak_wins, incl_conds,
     make_figs (bool): Whether to make HRF figure.
     peak_colnames (list): List of column names for PSC peak values.
   """
+  # Output dir identifies current analysis.
+  roi_id = os.path.basename(os.path.dirname(out_prefix))
+
   # Put data table header together.
-  header = ['Cond', 'N']
+  header = ['ID', 'Cond', 'N']
   if peak_colnames is not None:
     header.extend(peak_colnames)
   else:
@@ -881,10 +884,10 @@ def save_psc_data(psc, peak, counts, rel_ons, durs, peak_wins, incl_conds,
 
   # Fill in data.
   for i, cond in enumerate(incl_conds):
-    data_table[i+1, :2] = [cond, counts[cond]]
-    peak_stop = 2+len(peak[cond])
+    data_table[i+1, :3] = [roi_id, cond, counts[cond]]
+    peak_stop = 3+len(peak[cond])
     psc_stop = peak_stop + psc[cond].size
-    data_table[i+1, 2:peak_stop] = peak[cond]
+    data_table[i+1, 3:peak_stop] = peak[cond]
     data_table[i+1, peak_stop:psc_stop] = psc[cond]
   data_table = data_table.astype('S20')
   np.savetxt('{}_results.csv'.format(out_prefix), data_table, fmt='%.20s', delimiter=',')
