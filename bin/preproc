@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# TODO: Standardize FIX and AROMA arguments
+
 err () {
   # general function to pass all errors to
   if [[ -n $startlogging ]]; then
@@ -148,7 +150,7 @@ elif [[ $1 == -h || $1 == --help ]]; then
   echo "                      [default: 128 -1]"
   echo "  --nuis-reg <mode>   Regress out nuisance covariates: white matter signal, CSF"
   echo "                      signal, or linear trend. Mode should be a comma-"
-  echo "                      separated list of: wm, csf, or lin (E.g. --mode wm,lin)."
+  echo "                      separated list of: wm, csf, or lin (E.g. --nuis-reg wm,lin)."
   echo "                      (Note: You can always include these in your GLM, rather"
   echo "                      regress out here, which will be less aggressive.)"
   echo "  --fdrms <thr>       Detect motion outliers using FDRMS metric. (See FMRIB"
@@ -325,6 +327,8 @@ elif [[ $# == 1 ]]; then
     err "Restart stage should be between 2-7."
   fi
   featdir=${1%/}
+  # work regardless whether .feat included
+  featdir=${featdir%.feat}.feat
   func=$featdir/filtered_func_data.nii.gz
   if [[ ! -f $func ]]; then
     err "Volume data $func doesn't exist. Can't restart."
@@ -507,6 +511,7 @@ if (( $ststage <= 1 )); then
   fi
   while [[ -e ${output}.feat ]]; do
     output=$output+
+    featdir=${output}.feat
   done
 
   # feat preparation
@@ -540,7 +545,7 @@ if (( $ststage <= 1 )); then
   ## Why do we have to do this again? If scaling also happens in feat?
   echo "(id=$id) Grand mean intensity scaling..." | tee -a $log
   globmean=`fslstats $func -k $featdir/mask.nii.gz -M`
-  fslmaths $func -div $globmean -mul 10000 $scaler $func 2>&1 1>/dev/null | tee -a $log
+  fslmaths $func -div $globmean -mul 10000 $func 2>&1 1>/dev/null | tee -a $log
   fslmeants -i $func -o $featdir/mc/globsig.txt -m $featdir/mask.nii.gz
   fsl_tsplot -i $featdir/mc/globsig.txt -o $featdir/mc/globsig.png \
     -t "Global Signal (mean=10000)" 2>&1 1>/dev/null | tee -a $log
