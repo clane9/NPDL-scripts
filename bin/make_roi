@@ -55,11 +55,13 @@ Options:
   --lit-coord <coord>  Measure and report distance from ROI peak to literature
                        or group average coordinate. Coordinate can be X,Y,Z or
                        vertex index (E.g. --lit-coord=20.,19.,-5.).
-  --peak-thr <thr>     Threshold for finding distinct peaks of activation in
+  --peak-thr <perc>    Threshold for finding distinct peaks of activation in
                        watershed mode. Each connected cluster above this
-                       threshold will give rise to a distinct ROI. Can be
-                       overridden by including a seed file or giving
-                       the --man-seeds flag. [default: 3.0]
+                       threshold will give rise to a distinct ROI. Threshold
+                       should be a percentile, as with the -p <perc> option.
+                       E.g. --peak-thr 10 for a top 10% threshold Can be
+                       overridden by including a seed file or giving the
+                       --man-seeds flag. [default: 5]
   --eval <metric>      Metric to use when weighing ROI candidates. Options are
                        "strength" (sum of stat values), "dist" (weighted
                        average distance from literature coord to ROI),
@@ -172,6 +174,8 @@ def main():
     stat = np.ones(surf.num_verts)
   # Used in a few places for finding accurate peaks after masking
   shift_stat = stat - stat.min() + 1.0
+  # Used for displaying stat in tksurfer
+  stat_uthr = np.percentile(stat, 99.)
 
   # Load search space.
   search_path = ARGS['--search']
@@ -235,7 +239,7 @@ def main():
       raise NPDLError('Watershed procedure requires a connected search space.')
 
     if seeds is None:
-      cluster_mask = thr_roi(num_opts['--peak-thr'], stat, search)
+      cluster_mask = top_perc_roi(num_opts['--peak-thr'], stat, search)
       clusters, num_clusters = find_clusters(cluster_mask, surf)
       seeds = []
       for i in range(1, num_clusters+1):
@@ -243,7 +247,7 @@ def main():
         seed = np.array([np.argmax(masked_stat)])
         seeds.append(seed)
     elif seeds == 'manual':
-      seeds = pick_seeds(sub, hemi, search_path, stat_path)
+      seeds = pick_seeds(sub, hemi, search_path, stat_path, stat_uthr)
 
     if num_opts['-t'] is None:
       fill_stop = 0.0
@@ -293,7 +297,7 @@ def main():
   roi_stats = np.hstack([roi_nums, roi_stats])
 
   if select_mode == 'pick':
-    choice = pick_roi(sub, hemi, rois, roi_stats, search_path, stat_path, surf_path)
+    choice = pick_roi(sub, hemi, rois, roi_stats, search_path, stat_path, surf_path, stat_uthr)
     rois = rois[[choice]]
     roi_stats = roi_stats[[choice], :]
   elif select_mode == 'best':
@@ -423,13 +427,13 @@ def count_components(mask, surf):
   clusters, num_clusters = find_clusters(mask, surf)
   return num_clusters
 
-def pick_seeds(sub, hemi, search_path, stat_path):
+def pick_seeds(sub, hemi, search_path, stat_path, uthr=4.26):
   """Pick seed vertices manually using tksurfer."""
   tmpdir = tf.mkdtemp(prefix='seeds-')
   label_path = '{}/search.label'.format(tmpdir)
   cor2label(search_path, label_path, sub, hemi)
 
-  fmin, fmax = 1.65, 3.3 # for zstat, p=.05 -> p=.0005
+  fmin, fmax = 2.33, uthr
   command = ('tksurfer {} {} inflated -label {} -label-outline -overlay {} ' +
              '-fminmax {} {}').format(sub, hemi, label_path, stat_path, fmin, fmax)
   proc = PopThread(command)
@@ -484,7 +488,7 @@ class PopThread(th.Thread):
       self.p.terminate()
     return
 
-def pick_roi(sub, hemi, rois, roi_stats, search_path, stat_path, surf_path):
+def pick_roi(sub, hemi, rois, roi_stats, search_path, stat_path, surf_path, uthr=4.26):
   """Choose ROI from a set of options using tksurfer."""
   tmpdir = tf.mkdtemp(prefix='pick-roi-')
   label_path = '{}/search.label'.format(tmpdir)
@@ -496,7 +500,7 @@ def pick_roi(sub, hemi, rois, roi_stats, search_path, stat_path, surf_path):
   img_save(seg_path, combined_rois, surf_path)
   seg2annot(seg_path, annot_path, sub, hemi)
 
-  fmin, fmax = 1.65, 3.3 # for zstat, p=.05 -> p=.0005
+  fmin, fmax = 1.65, uthr
   command = ('tksurfer {} {} inflated -label {} -label-outline -overlay {} ' +
              '-fminmax {} {} -annotation {}').format(sub, hemi, label_path,
                                                      stat_path, fmin, fmax,
