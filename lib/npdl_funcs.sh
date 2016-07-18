@@ -33,8 +33,8 @@ checksurf() {
     -f \
     $subdir/surf/lh.white:edgecolor=blue:edgethickness=2 \
     $subdir/surf/rh.white:edgecolor=blue:edgethickness=2 \
-    $subdir/surf/lh.pial:edgecolor=green:edgethickness=2 \
-    $subdir/surf/rh.pial:edgecolor=green:edgethickness=2 \
+    $subdir/surf/lh.pial:edgecolor=green:edgethickness=2:annot=$subdir/label/lh.aparc.annot \
+    $subdir/surf/rh.pial:edgecolor=green:edgethickness=2:annot=$subdir/label/rh.aparc.annot \
     $subdir/surf/lh.inflated:edgethickness=0:visible=0 \
     $subdir/surf/rh.inflated:edgethickness=0:visible=0
   return
@@ -819,4 +819,33 @@ make_data_gif () {
   rm -r $tmpdir
 }
 
-export -f command_check checksurf checkffx odd_or_even beta_calc threshroi latcheck percentroi label2mask takesnap imgtrim latcheck2 make_data_gif
+# Set subjects dir to nearest parent SurfAnat folder.
+setsd () {
+  if [[ $1 == -h || $1 == --help ]]; then
+    echo "Usage: setsd"
+    echo
+    echo "Set SUBJECTS_DIRECTORY to nearest parent SurfAnat folder."
+    return 0
+  fi
+
+  PARENT=$(pwd)
+  PASSED=
+  while [[ -z $PASSED ]]; do
+    if [[ $PARENT == "/" ]]; then
+      PASSED=1
+      echo "ERROR: No parent SurfAnat folder found."
+    else
+      TEST=$(ls $PARENT | grep "SurfAnat")
+      if [[ -n $TEST ]]; then
+        PASSED=0
+        export SUBJECTS_DIR=$PARENT/SurfAnat
+        echo "SUBJECTS_DIR set to: $SUBJECTS_DIR"
+      else
+        PARENT=$(readlink -m $PARENT/..)
+      fi
+    fi
+  done
+  return $PASSED
+}
+
+export -f command_check checksurf checkffx odd_or_even beta_calc threshroi latcheck percentroi label2mask takesnap imgtrim latcheck2 make_data_gif setsd
