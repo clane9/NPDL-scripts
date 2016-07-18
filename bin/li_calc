@@ -343,7 +343,7 @@ def boot_li_calc(stats, thresholds, weighted=True, nsamples=100, k=1.0, nLIs=100
         break
       # generate bootstrap samples
       boot_size = int(np.round(thr_stat.size*k))
-      boot_samples = np.random.randint(0, boot_size, size=(nsamples, boot_size))
+      boot_samples = np.random.randint(0, thr_stat.size, size=(nsamples, boot_size))
       boot_samples = thr_stat[boot_samples]
       # calculate sums across voxels for each boot sample
       Qs[:, i] = np.sum(boot_samples, axis=1)
@@ -363,6 +363,7 @@ def boot_li_calc(stats, thresholds, weighted=True, nsamples=100, k=1.0, nLIs=100
     # trim bootstrapped LIs
     trim_boot_LIs = boot_LIs[(boot_LIs > trim_min) * (boot_LIs < trim_max)]
     # If too few LIs to trim, quit loop
+    # NOTE: could this ever happen??
     if trim_boot_LIs.size == 0:
       break
     # caclulate trimmed mean of bootstrapped LIs
