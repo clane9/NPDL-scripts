@@ -1,61 +1,86 @@
 #!/bin/bash
 
+# Performs first-level statistical analysis on a single functional run
+# using FSL's film_gls. First-level analysis takes the preprocessed
+# functional data as input, and uses a linear regression model (GLM) to
+# measure the fMRI response to task manipulations.
+
+# Preprocessed data are optionally smoothed and prewhitened prior to
+# regression.
+
+# Expected outputs include:
+# - parameter estimate (pe) images
+# - contrast of parameter estimates (cope)
+# - variance of contrasts (varcope)
+# - t-stat maps (tstat)
+# - zstat maps (zstat)
+
+# Background on first-level analysis in fMRI:
+# - Poldrack, 2011 Ch. 5 & App. A
+# - FSL Feat user guide: http://fsl.fmrib.ox.ac.uk/fsl/fslwiki/FEAT/UserGuide#Stats_.28First-level.29
+# - Friston, K. J., Holmes, A. P., Worsley, K. J., Poline, J. P., Frith, C.
+# D., & Frackowiak, R. S. (1994). Statistical parametric maps in functional
+# imaging: a general linear approach. Human brain mapping, 2(4), 189-210.
+
 err () {
+  # Error logging function.
+  # Prints process ID ($id) along with error message to log file and stderr.
   echo "ERROR: (id=$id) $1" | tee -a $log >&2
   cleanup
   exit 1
 }
 
 warn () {
+  # Warning logging function, similar to err.
   echo "WARNING: (id=$id) $1" | tee -a $log >&2
 }
 
 command_check () {
-  # PIPESTATUS is used in case last command is piped to tee
+  # Check if a command completed successfully.
+  # ${PIPESTATUS[0]} is used to ensure we check the first command in a
+  # pipeline. (Useful for when command output is piped elsewhere, e.g. to tee.)
+  # NOTE: Might better to check all exit statuses in $PIPESTATUS.
   if [[ ${PIPESTATUS[0]} != 0 ]]; then
     err "$1 failed"
   fi
 }
 
 num_check () {
-  # checks if input is a number. neg or pos; int or float
+  # Checks if input is a number. neg or pos; int or float.
   re='^-?([0-9]+)?[.]?[0-9]+$'
   if [[ ! $1 =~ $re ]] ; then
-   err "$1 is not a number"
+    err "$1 is not a number"
   fi
 }
 
 len () {
-  # like python's len function
-  length=0
-  while [[ -n $1 ]]; do
-    length=$((length+1))
-    shift
-  done
-  echo $length
+  # Returns length of space-separated list.
+  echo $#
 }
 
 cleanup () {
+  # Remove temp directory.
   if [[ -z $noclean ]]; then
     rm -r $tmpdir
   fi
 }
 
+# Remember to cleanup even if script is interrupted.
 trap "cleanup; exit 1" SIGHUP SIGINT SIGTERM
 
 if [[ $# == 0 ]]; then
-  echo "Usage: ${0##*/} [options] <func> <surf> <design> <EVs> <outdir>"
+  echo "Usage: firstlevel [options] <func> <surf> <design> <EVs> <outdir>"
   exit
 elif [[ $1 == -h || $1 == --help ]]; then
   echo
-  echo "Usage: ${0##*/} [options] <func> <surf> <design> <EVs> <outdir>"
+  echo "Usage: firstlevel [options] <func> <surf> <design> <EVs> <outdir>"
   echo
   echo "Perform firstlevel GLM analysis on a single functional run using FSL"
   echo "and the Connectome Workbench."
   echo
   echo "Example:"
-  echo "  ${0##*/} lh.32k.data.func.gii lh.32k.midthickness.surf.gii \ "
-  echo "    design.fsf \"BLAH_01-task_01-S.txt BLAH_01-task_01-NW.txt\" stats"
+  echo "  firstlevel lh.32k_fs_LR.surfed_data.func.gii lh.32k_fs_LR.midthickness.surf.gii \ "
+  echo "    design.fsf \"BSYN_01-bsyn_01-S.txt BSYN_01-bsyn_01-NW.txt\" bsyn_01.lh.glm"
   echo
   echo "Arguments:"
   echo "  <func>      Functional data to analyze (gifti format)."
@@ -63,11 +88,17 @@ elif [[ $1 == -h || $1 == --help ]]; then
   echo "  <design>    FSL fsf file describing the GLM analysis."
   echo "              (Use Feat or Glm guis to create it. Only the model"
   echo "              specific settings are necessary.)"
-  echo "  <EVs>       List of EV timing files in one of FSL's custom formats"
-  echo "              (3 column or single column). Basenames are expected to"
-  echo "              follow the convention: (.*-)?\`cond\`(.txt)?. Conditions"
-  echo "              must match those in design. The list must be enclosed"
-  echo "              in double quotes and the items separated by spaces."
+  echo "  <EVs>       List of EV timing files in FSL's 3 column format."
+  echo "              The condition name for each EV must be present in the"
+  echo "              timing file's base name. The condition name should be the"
+  echo "              last word to appear in the base name preceding the file"
+  echo "              extension. If there is anything before the condition in"
+  echo "              the base name, it should be separated from the condition"
+  echo "              by a dash. E.g. the following are legal base names for"
+  echo "              the condition \"NW\": NW.txt, bsyn_01-NW.txt,"
+  echo "              BSYN_01-bsyn_01-NW. Conditions must match those in"
+  echo "              design file. The list must be enclosed in double quotes"
+  echo "              and the items separated by spaces."
   echo "  <outdir>    Name of output directory."
   echo
   echo "Options:"
@@ -77,10 +108,15 @@ elif [[ $1 == -h || $1 == --help ]]; then
   echo "                  should be delimited by commas (E.g. --cfd cfd1.txt,cfd2.txt)"
   echo "  --tr <secs>     TR for <func-data> in seconds. [default: 2]"
   echo "  --hpf <secs>    High pass filter cutoff in seconds. This is the"
-  echo "                  longest temporal period that will remain int the"
+  echo "                  longest temporal period that will remain in the"
   echo "                  model. It should match the value used during"
   echo "                  preprocessing. [default: 128]"
-  echo "  --fwhm <num>    Pre-stats smoothing kernel in mm. [default: 9.8]"
+  echo "  --fwhm <num>    Pre-stats smoothing kernel in mm. Note that the total"
+  echo "                  smoothness after smoothing by X during preprocessing,"
+  echo "                  and Y during first-level is FWHM = sqrt(X^2 + Y^2)."
+  echo "                  The default assumes 2mm smoothing during preprocessing"
+  echo "                  to bring the overall smoothness to 6mm. (Set to 0 for no"
+  echo "                  smoothing.) [default: 5.66]"
   echo "  --pw (0|1|2)    Prewhitening level. O is none, 1 is fast"
   echo "                  (no ac smoothing), 2 is full. [default: 2]"
   echo "  --no-clean      Don't delete intermediate files."
@@ -89,8 +125,8 @@ elif [[ $1 == -h || $1 == --help ]]; then
   exit 
 fi
 
-## maybe should change it so that default is to read tr, hpf from design
-## fwhm should be less by default, 0 possibly
+# TODO: maybe should change it so that default is to read tr, hpf from design
+# fwhm should be less by default, 0 possibly
 
 # misc variables
 args=$@
@@ -105,14 +141,15 @@ log=firstlevel_`date +%m-%d`.log
 confounds=
 tr=2
 hpf=128
-fwhm=9.8
+fwhm=5.65685
 pw=2
 noclean=
 
-# parse options
+# Parse command-line flagged arguments/options.
 while [[ $1 == -* ]]; do
   case $1 in
     --cfd)
+      # NOTE: odd that tr command still words even though we defined a variable tr.
       confounds=`echo $2 | tr , " "`
       shift
       shift
@@ -157,10 +194,12 @@ while [[ $1 == -* ]]; do
   esac
 done
 
+# Read positional arguments.
 if [[ $# != 5 ]]; then
   echo "ERROR: Incorrect number of arguments ($#)." >&2
   exit 1
 fi
+
 func=$1
 surface=$2
 design=$3
@@ -171,21 +210,26 @@ printf '%s\n%s\n' "Starting firstlevel job at $now (id=$id)." \
   "command line: $scriptname $args" | tee -a $log
 tmpdir=`mktemp -d /tmp/firstlevel-XXX`
 
-# input checking
-# first pass
+# Check inputs.
+# Input checking happens in two passes. The first pass is more superficial.
 echo "(id=$id) Checking inputs..." | tee -a $log
 
-# checking options
+# Temporary dir for storing timing files.
 timingdir=$tmpdir/timing_files
 mkdir $timingdir
+
+# Check if each confound file exists.
 if [[ -n $confounds ]]; then
   for f in $confounds; do
     if [[ ! -f $f ]]; then
       err "confound $f does not exist."
     fi
   done
+  # Concatenate confound files horizontally to make one big confound regressor.
   paste $confounds > $timingdir/confound.txt
 fi
+
+# Check numerical options.
 num_check $tr
 num_check $hpf
 num_check $fwhm
@@ -193,7 +237,7 @@ if [[ $pw != [012] ]]; then
   err "Prewhitening level must be 0, 1, or 2."
 fi
 
-# Checking arguments
+# Check that input surface data exists.
 if [[ ! -f $func ]]; then
   err "$func does not exist."
 fi
@@ -201,12 +245,14 @@ if [[ ! -f $surface ]]; then
   err "$surface does not exist."
 fi
 
-## how much slowdown would all the parallel jobs fighting over the design cause?
+# Check that the design exists, and copy it to temp dir.
 if [[ ! -f $design ]]; then
   err "$design does not exist."
 fi
 tmp_design=$tmpdir/design.fsf
 cp $design $tmp_design 
+
+# Check that design file is set up to run first-level stats.
 feat_level=`grep "set fmri(analysis)" $tmp_design | sed 's@set fmri(analysis) @@'`
 if [[ -z $feat_level ]]; then
   err "$design has bad format."
@@ -215,6 +261,8 @@ if [[ $feat_level != [7326] ]]; then
   err "$design is not set up for stats."
 fi
 
+# Check that all timing files exist, and that the number of timing files
+# matches the number of EVs in the design. Copy timing files to temp dir.
 design_ev_count=`grep 'set fmri(evs_orig)' $tmp_design | sed 's@set fmri(evs_orig) @@'`
 if [[ $design_ev_count != `len $evs` ]]; then
   err "Different number of EVs specified in $design than provided."
@@ -226,8 +274,10 @@ for ev in $evs; do
   cp $ev $timingdir/`basename $ev`
 done
 
+# Check that the directory above the out dir exists. If the out dir already
+# exists, add a + sign to avoid overwriting.
 if [[ ! -d `dirname $outdir` ]]; then
-  err "Directory above the outdir `dirname $outdir` does not exist."
+  err "Directory above the outdir: `dirname $outdir` does not exist."
 fi
 if [[ -e $outdir ]]; then
   warn "$outdir already exists."
@@ -238,68 +288,91 @@ if [[ -e $outdir ]]; then
   done
 fi
 
-# input checking second pass
-# -file-information can take a while
-# func-data
+# Input checking: second pass.
+
+# Check the format of the functional data.
+# wb_command -file-information can take a while, which is why we wait until now
+# to run it. We don't want to spend time running it if there's another more
+# obvious error we could have spotted sooner.
 wb_command -file-information $func >> $tmpdir/func_info.txt
+# Note that we don't use command_check here because we want to give a more
+# descriptive error message than just "something failed".
 if [[ $? != 0 ]]; then
-  err "$func doesn't appear to be a *.gii file."
+  err "$func is not a valid gifti file."
 fi
-# get the number of timepoints out of func_info.txt
-nvols=`head -n 10 $tmpdir/func_info.txt | grep 'Number of Maps' | sed 's@\(Number of Maps:\s\+\)\([0-9]\+\)@\2@'`
+# Get the number of timepoints out of func_info.txt. 
+# Check that the functional data is 4d.
+nvols=`cat $tmpdir/func_info.txt | grep 'Number of Maps' | sed 's@\(Number of Maps:\s\+\)\([0-9]\+\)@\2@'`
 if (( $nvols == 1 )); then
-  err "$func is not a 4d *.gii file."
+  err "$func is not a 4d gifti file."
 fi
 if (( $nvols <= 50 )); then
   warn "$func has fewer than 50 timepoints."
 fi
 
-# surface
+# Check the format of the surface file.
 wb_command -file-information $surface >> $tmpdir/surface_info.txt 
 if [[ $? != 0 ]]; then 
-  err "$surface doesn't appear to be a *.gii file."
+  err "$surface is not a valid gifti file."
 fi
 
-# more checking, and design editing
+# Check that all EVs have the right file name format.
+# Check that EV conditions match the design file.
+# Replace EV file paths in design file with the true paths.
 for ev in $evs; do
-  cond=`basename ${ev%.txt}`
+  # Pull condition out of timing file name.
+  cond=`basename ${ev%.*}`
   cond=${cond##*-}
+  # Look for condition in design file, and pull out its EV index.
   evidx=`grep "set fmri(evtitle[0-9]\+) \"$cond\"" $tmp_design | \
     sed 's@\(set fmri(evtitle\)\([0-9]\+\)\(.*\)@\2@'`
   if [[ -z $evidx ]]; then
     err "EV with condition $cond not found in $design."
   fi
+  # Replace EV file path with actual (absolute) path to timing file.
+  # Note that the original timing file paths go in the design, not the temp dir copies.
   fullev=`readlink -m $ev`
   sed -i 's@\(set fmri(custom'$evidx')\)\(.*\)@\1 \"'$fullev'\"@' $tmp_design
-  # empty check
+  # If there were no events for this condition and run, set the EV's shape to
+  # "empty". 10 is the code for an empty regressor.
   if [[ -z `cat $ev` ]]; then
     sed -i 's@\(set fmri(shape'$evidx')\)\(.*\)@\1 10@' $tmp_design
   fi
 done
 
+# Substitute the correct TR, hpf, and # timepoints in the design file.
 sed -i 's@\(set fmri(tr)\)\(.*\)@\1 '$tr'@' $tmp_design
 sed -i 's@\(set fmri(paradigm_hp)\)\(.*\)@\1 '$hpf'@' $tmp_design
 sed -i 's@\(set fmri(npts)\)\(.*\)@\1 '$nvols'@' $tmp_design
 
-# checking that confounds are text matrices with as many rows as TRs
+# Check the format of confound files. 
+# They should be text matrices with as many rows as TRs.
 if [[ -n $confounds ]]; then
   for confound in $confounds; do
     cfdwc=`wc $confound`
     lines=`echo $cfdwc | awk '{print $1}'`
+    # entries is the total number of "words" in the file.
+    # For an M x N matrix, it should be M * N.
     entries=`echo $cfdwc | awk '{print $2}'`
+    # NOTE: This is a sufficient but not actually a necessary condition for a
+    # bad confound. You could get ($entries % $nvols) == 0 by chance, even if
+    # the lines have different numbers of values. Doesn't really matter though
+    # since no one ever messes up confound files!
     if (( $lines != $nvols || ($entries % $nvols) != 0 )); then
       err "confound $confound has bad format."
     fi
   done
 fi
 
+# Finally done input checking!
+# Make output directory and move temp directory from /tmp to the out dir.
 mkdir $outdir
 mv $tmpdir $outdir/tmp
 tmpdir=$outdir/tmp
 mv $tmpdir/timing_files $outdir
 mv $tmpdir/*info.txt $outdir
 
-# add pasted confound file to design
+# Add pasted confound file to design.
 confound=$outdir/timing_files/confound.txt
 if [[ -f $confound ]]; then
   echo >> $tmpdir/design.fsf
@@ -308,11 +381,18 @@ if [[ -f $confound ]]; then
   echo "set confoundev_files(1) \"`readlink -m $confound`\"" >> $tmpdir/design.fsf
 fi
 
-echo "$scriptname $args" >> $outdir/commandline
+# Save a copy of what firstlevel command was run in the out dir.
+echo "$scriptname $args" >> $outdir/command.txt
 
-# mask creation
+# Create a data mask and an inverse data mask for the functional data.
+# Stats will only be performed within the data mask. The mask is defined as all
+# voxels with non-zero variance. It assumes that non-data voxels have already
+# been "masked out" during preprocessing (i.e. set to zero).
 mask=$outdir/mask.shape.gii
 invmask=$tmpdir/inverse_mask.shape.gii
+# wb_command -metric-reduce takes a 4d gifti data file as input and does some
+# operation to collapse across time. E.g. it can take the sum across time, the
+# variance, the mean, etc.
 wb_command -metric-reduce $func VARIANCE $mask >/dev/null 2>&1
 command_check "mask creation"
 wb_command -metric-math "mask>0" $mask -var mask $mask >/dev/null 2>&1
@@ -320,30 +400,63 @@ command_check "mask creation"
 wb_command -metric-math "mask<=0" $invmask -var mask $mask >/dev/null 2>&1
 command_check "inverse mask creation"
 
+# Do pre-stats smoothing.
 TEST=`echo "$fwhm > 0" | bc -l`
 if [[ $TEST == 1 ]]; then
-  echo "(id=$id) Smoothing data on the surface..." | tee -a $log
-  sigma=`echo "$fwhm / 2.35482" | bc -l` # http://en.wikipedia.org/wiki/Gaussian_function
+  echo "(id=$id) Smoothing data on the surface (fwhm=$fwhm)..." | tee -a $log
+  # TODO: The fwhm and other parameters should be saved somewhere in the out
+  # dir (so we can remember what we did later!)
+  # Calculate Gaussian sigma from FWHM
+  # Wikipedia: http://en.wikipedia.org/wiki/Gaussian_function
+  sigma=`echo "$fwhm / 2.35482" | bc -l` 
   wb_command -metric-smoothing $surface $func $sigma \
     $tmpdir/smooth${fwhm}-${func##*/} -roi $mask 2>&1 1>/dev/null | tee -a $log
   command_check "data smoothing"
+  # Rename func variable to point to smoothed functional data.
   func=$tmpdir/smooth${fwhm}-${func##*/}
 fi
 
-# maybe add in option to fill in small holes with real seeming data too
-# remove that duty from preprocessing script, which is really the wrong place for it
+# Dilate the functional data before running stats.
+# This is important because vertices' with constant time-series' cause problems
+# in film_gls. Dilation fills in the bad vertices' in each TR with the values
+# from neighboring vertices. Because across TRs, a bad vertex's neighbors'
+# values change, this guarantees that all bad vertices get filled in with
+# time-varying time-series'.
+# TODO: Maybe add in option to fill in small holes with real seeming data too
+# remove that duty from preprocessing script, which is really the wrong place for it.
 echo "(id=$id) Dilating the data..." | tee -a $log
+# TODO: Figure out if 50mm is ever not enough.
 wb_command -metric-dilate $func $surface 50 \
   $tmpdir/dil-${func##*/} -bad-vertex-roi $invmask \
   -nearest 2>&1 1>/dev/null | tee -a $log
 command_check "data dilation"
+# Rename func variable to point to dilated functional data.
 func=$tmpdir/dil-${func##*/}
 
-# producing design* files
+# Generate design* files using feat_model.
+# TODO: Figure out why we need to pass $confound as an argument when we already
+# added it to the design file.
 feat_model $tmpdir/design $confound >> $outdir/stats.log 2>&1
 command_check "feat_model"
-mv $tmpdir/design.mat $tmpdir/design.con $tmpdir/design.fsf $tmpdir/design.png $outdir
+# Copy design* files to out dir for use in film_gls.
+# The extra design images can also be good to review later.
+mv $tmpdir/design* $outdir
 
+# ------------------------------------------------------------------------------
+# Run statistics.
+# ------------------------------------------------------------------------------
+
+# Prewhitening optionally happens before stats.
+# It's the most time-consuming step of the stats, so it's sometimes a good idea
+# to leave it out, if your analysis does not depend on the iid errors assumption
+# of the GLM.
+# The prewhitening options include:
+# - 0: (--noest) prewhitening disabled
+# - 1: standard prewhitening, without spatial smoothing of auto-correlation (ac)
+#      estimates.
+# - 2: (--sa --ms=15 --epith=5) Full prewhitening, including smoothing of ac
+#      estimates, using a 5mm smoothing kernel within a 15mm radius circle.
+#      *Options adopted from HCP-style analysis.*
 echo "(id=$id) Performing stats..." | tee -a $log
 pwargs=( "--noest" "" "--sa --ms=15 --epith=5" )
 pwarg=${pwargs[$pw]}
@@ -354,7 +467,9 @@ film_gls --rn=$statsdir --in=$func --in2=$surface \
   --con=$outdir/design.con >> $outdir/stats.log 2>&1 
 command_check "film_gls"
 
-# masking images
+# ------------------------------------------------------------------------------
+
+# Mask stats outputs using data mask (set non-data vertices to 0).
 echo "(id=$id) Masking stats images..." | tee -a $log
 for stattype in cope varcope tstat zstat; do
   for gii in $statsdir/${stattype}*.func.gii; do
