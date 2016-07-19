@@ -82,10 +82,9 @@ from datetime import datetime as dt
 import numpy as np
 import os
 import re
-from scipy.linalg import block_diag
 import sys
 
-from npdl_utils import Logger, NPDLError, img_read, read_table, init_table, normalize, resample, plot_hrf, fit_glm
+from npdl_utils import Logger, NPDLError, img_read, read_table, init_table, normalize, resample, plot_hrf, fit_glm, block_diag
 
 logger = Logger(global_log=None, local_log=None, pid=os.getpid())
 
