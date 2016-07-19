@@ -484,8 +484,9 @@ def block_diag(*arrs):
     
     # Pad block with zeros below, and arr with zeros above.
     num_new_rows = arr.shape[0]
+    num_current_rows = block.shape[0]
     block = np.vstack([block, np.zeros((num_new_rows, block.shape[1]))])
-    arr = np.vstack([np.zeros((num_new_rows, arr.shape[1])), arr])
+    arr = np.vstack([np.zeros((num_current_rows, arr.shape[1])), arr])
 
     # Stack block and arr horizontally
     block = np.hstack([block, arr])
