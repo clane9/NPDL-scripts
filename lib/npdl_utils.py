@@ -453,3 +453,41 @@ def fit_glm(TS, DM, cfd_mat=None, intercept=True, outdir=None,
   else:
     bl = None
   return bl, beta
+
+def block_diag(*arrs):
+  """
+  Create a block diagonal matrix from provided arrays.
+
+  Given the inputs `A`, `B` and `C`, the output will have these
+  arrays arranged on the diagonal::
+
+  [[A, 0, 0],
+  [0, B, 0],
+  [0, 0, C]]
+
+  NOTE: This function is needed in place of scipy.linalg.block_diag in
+  roi_extract because, in Scipy v. 0.17.0, the ability to create a
+  block-diagonal matrix from 0-width matrices was lost.
+  """
+  
+  # Initialize block diag matrix with (0, 0) shape.
+  block = np.zeros((0, 0))
+  
+  # Make sure arrs contains actual numpy arrays
+  arrs = [np.array(arr) for arr in arrs]
+  
+  for arr in arrs:
+    # 1-D vectors should be treated as row-vector, for consistency with scipy
+    # block_diag function.
+    if len(arr.shape) == 1:
+      arr = arr.reshape(1, -1)
+    
+    # Pad block with zeros below, and arr with zeros above.
+    num_new_rows = arr.shape[0]
+    block = np.vstack([block, np.zeros((num_new_rows, block.shape[1]))])
+    arr = np.vstack([np.zeros((num_new_rows, arr.shape[1])), arr])
+
+    # Stack block and arr horizontally
+    block = np.hstack([block, arr])
+
+  return block
