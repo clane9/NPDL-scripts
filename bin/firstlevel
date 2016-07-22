@@ -22,6 +22,8 @@
 # D., & Frackowiak, R. S. (1994). Statistical parametric maps in functional
 # imaging: a general linear approach. Human brain mapping, 2(4), 189-210.
 
+# TODO: add structure to gifti outputs
+
 err () {
   # Error logging function.
   # Prints process ID ($id) along with error message to log file and stderr.
@@ -126,7 +128,6 @@ elif [[ $1 == -h || $1 == --help ]]; then
 fi
 
 # TODO: maybe should change it so that default is to read tr, hpf from design
-# fwhm should be less by default, 0 possibly
 
 # misc variables
 args=$@

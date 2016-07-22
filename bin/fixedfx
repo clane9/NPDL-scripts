@@ -8,6 +8,10 @@
 
 # Some background on WLS: https://onlinecourses.science.psu.edu/stat501/node/352.
 
+# TODO: Include concatenated z-maps for each contrast, across runs.
+# TODO: Make threshold for missing runs to be excluded an option. (E.g. exclude
+# voxels missing for >3 runs.)
+
 err () {
   # Error logging function.
   # Prints process ID ($id) along with error message to log file and stderr.

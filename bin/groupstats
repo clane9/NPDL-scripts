@@ -26,6 +26,11 @@ Options:
   --log <logfile>    Specify the log file.
 """
 
+# TODO: Should consider moving to using FSL's PALM tool for multiple comparison
+# correction (http://fsl.fmrib.ox.ac.uk/fsl/fslwiki/PALM/UserGuide).
+# TODO: Should add support for F-tests.
+# TODO: Should handle missing data with voxelwise EVs, as in fixedfx.
+
 # put this up here to avoid imports if I'm only trying to get help message
 from docopt import docopt
 args = docopt(__doc__)
