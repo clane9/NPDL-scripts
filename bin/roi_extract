@@ -494,12 +494,15 @@ def main():
 
     # Initialize baseline mask
     bl_mask = np.ones(TS.size)
+    
+    # Can't have different PSC lengths for different conditions here.
+    # TODO: Need to check works right, has no unintended consequences.
+    tr_dur = max([tr_durs[cond] for cond in incl_conds])
 
     idx = 1
     for i, run_len in enumerate(run_lens):
       tr_prefix = np.sum(run_lens[:i])
       for j, cond in enumerate(incl_conds):
-        tr_dur = tr_durs[cond]
         cond_events = events.event_query(i, cond)[:, 2:4]
         # Loop through in chronological order
         cron_order = np.argsort(cond_events[:, 0])
@@ -535,7 +538,8 @@ def main():
     for cond in incl_conds:
       cond_mask = tbt_data[:, 1] == cond
       agg = np.nanmean(tbt_data[cond_mask, 4:].astype(float), axis=0)
-      classic_psc[cond] = agg[1:]
+      # Make each PSC the right length for different conds.
+      classic_psc[cond] = agg[1:tr_durs[cond]+1]
       classic_peak[cond] = [agg[0]]
 
   # ----------------------------------------------------------------------------
