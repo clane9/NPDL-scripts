@@ -60,8 +60,8 @@ Options:
                        threshold will give rise to a distinct ROI. Threshold
                        should be a percentile, as with the -p <perc> option.
                        E.g. --peak-thr 10 for a top 10% threshold Can be
-                       overridden by including a seed file or giving the
-                       --man-seeds flag. [default: 5]
+                       overridden by including a seed file or giving
+                       the --man-seeds flag. [default: 5]
   --eval <metric>      Metric to use when weighing ROI candidates. Options are
                        "strength" (sum of stat values), "dist" (weighted
                        average distance from literature coord to ROI),
