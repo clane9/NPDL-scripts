@@ -22,8 +22,11 @@ set -a
 #   - R (> 3.2.0) [kernlab, ROCR, class, party, e1071, randomForest]
 #   - MATLAB
 # - ICA-AROMA (0.3_beta)
+# - FSL PALM (alpha97)
 
+# -----------------------------------------------------
 # Assign directory paths below according to your setup.
+# -----------------------------------------------------
 
 # FSL setup.
 FSLDIR=
@@ -44,6 +47,17 @@ PATH=$PATH:$WB_DIR/bin_rh_linux64
 # Mricron setup.
 MRICRON_DIR=
 PATH=$PATH:$MRICRON_DIR
+
+# You can add MATLAB to path here, But you don't have to since it isn't
+# strictly a dependency (except for PALM).
+# PATH=$PATH:/usr/share/MATLAB/R2014a/bin
+
+# PALM setup (optional).
+# Note that in the script ``palm``, there is a reference to the MATLAB path.
+# If MATLAB moves somewhere, or gets updated, this script will need to
+# modified.
+# PALM_DIR=
+# PATH=$PATH:$PALM_DIR
 
 # Script-specific setup
 # ---------------------
