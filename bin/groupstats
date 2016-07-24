@@ -86,12 +86,20 @@ logfile = None
 SD = environ['SUBJECTS_DIR']
 
 def main(args):
-  # Make logfile global so we can set its global value within the opt_check function.
+  
+  # First read the --log, so we can write warnings to it.  We need to set it to
+  # global so we can change its global value here
   global logfile
-
-  # Read and validate options and arguments.
-  hemi, design, con, outdir, ffxdirs, copes = arg_check(args)
-  subj, copes, do_ols, dilmm, logfile = opt_check(args, copes)
+  logfile = args['--log']
+  if logfile is not None:
+    logdir = path.dirname(path.abspath(logfile))
+    if not path.isdir(logdir):
+      raise GroupError('directory above log file: {} does not exist.'.format(logdir))
+  else:
+    # Default global log.
+    logfile = 'groupstats_{}.log'.format(now.strftime('%m%d%y'))
+  # Global logfile variable now points to an open file object. *Not a path string.*
+  logfile = open(logfile, 'a')
 
   # Start logging
   # There are two logs: a "global" log (referenced by the --log <log> flag),
@@ -100,7 +108,12 @@ def main(args):
   # time, and you want all the logging in one place.
   command_line = scriptname + ' ' + ' '.join(argv[1:])
   logtee('groupstats run at {} (id={})\ncommand line: {}\n'.format(now.strftime('%m-%y %H:%M:%S'), pid, command_line))
-  logtee('(id={}) Prepping inputs...\n'.format(pid))
+
+  # Read and validate options and arguments.
+  hemi, design, con, outdir, ffxdirs, copes = arg_check(args)
+  subj, copes, do_ols, dilmm = opt_check(args, copes)
+  
+  # Make the output directory, and start the local log.
   mkdir(outdir)
   write_out('{}/log'.format(outdir), 'command line: {}\n\n'.format(command_line))
 
@@ -126,6 +139,7 @@ def main(args):
   #     https://www.mail-archive.com/freesurfer%40nmr.mgh.harvard.edu/msg21068.html
   # For this reason, I decided to stop supporting them. It would be a big
   # problem to report incorrect stats because of this bug!
+  logtee('(id={}) Prepping inputs...\n'.format(pid))
   make_design_con(design, con, outdir)
   make_images(ffxdirs, copes, do_ols, outdir)
   if dilmm is not None:
@@ -180,11 +194,12 @@ def main(args):
   # Another option is to use FSL's PALM tool, which has more options.
   done_s += 'Or, you can use FSL\'s PALM tool, for more extensive options. E.g.:\n'
   done_s += 'palm -i {}/cope{}/cope{}.func.gii \\\n'.format(absoutdir, copes[0], copes[0])
-  done_s += '    -m {}/cope{}/mask.mgh \\\n'.format(absoutdir, copes[0])
+  done_s += '    -m {}/cope{}/mask.shape.gii \\\n'.format(absoutdir, copes[0])
   done_s += '    -s {}/{}/surf/{}.midthickness.surf.gii \\\n'.format(SD, subj, hemi)
-  done_s += '    -d {}/design.csv -t {}/con1.csv \\\n'.format(absoutdir, absoutdir)
-  done_s += '    -n 5000 -T -C 2.3 -Cstat mass \\\n'
-  done_s += '    -o {}/cope{}/con1/palm_ -logp\n\n'.format(absoutdir, copes[0])
+  done_s += '    -d {}/design.csv \\\n'.format(absoutdir)
+  done_s += '    -t {}/con1.csv \\\n'.format(absoutdir)
+  done_s += '    -n 5000 -ee -ise -T -C 2.3 -Cstat mass \\\n'
+  done_s += '    -o {}/cope{}/con1/palm -logp\n\n'.format(absoutdir, copes[0])
   done_s += 'This will perform 5000 iterations, using two test-statistics: TFCE (-T),\n'
   done_s += 'and cluster mass, with a cluster-forming threshold of z=2.3 (p=.01) (-C 2.3).\n'
   done_s += 'Again, one-sided tests are assumed. P-value outputs are saved as -log10(p).\n'
@@ -198,7 +213,8 @@ def logtee(s):
   """
   Save a message to the global log, and also print to the console.
   """
-  logfile.write(s)
+  if logfile is not None:
+    logfile.write(s)
   print s
   return
 
@@ -229,11 +245,13 @@ mri_glmfit = make_cmnd('mri_glmfit')
 metric_merge = make_cmnd('wb_command -metric-merge')
 metric_dilate = make_cmnd('wb_command -metric-dilate')
 fdr_corr = make_cmnd('fdr_corr', with_output=True)
+mris_convert = make_cmnd('mris_convert')
 
 def arg_check(args):
   """
   Quality check arguments.
   """
+
   # Hemisphere.
   hemi = args['<hemi>']
   if not hemi in {'lh', 'rh'}:
@@ -254,8 +272,10 @@ def arg_check(args):
   # multiple t-contrasts. In this case, the contrast will be interpreted
   # incorrectly, as an F-contrast.
   if len(con) > 1:
-    print >> stderr, 'WARNING: contrast file contains more than one row. It will be treated as an F-contrast.'.format(outdir)
     logtee('(id={}) WARNING: contrast file contains more than one row. It will be treated as an F-contrast.'.format(pid, outdir))
+  # Check that contrast and design lengths match.
+  if len(con[0]) != len(design[0]):
+    raise GroupError('contrast and design matrix should have the same number of columns.')
 
   # Output directory.
   outdir = args['<outdir>']
@@ -264,7 +284,6 @@ def arg_check(args):
   # If the ouput directory already exists, don't overwrite. Just add a '+' to
   # the dir name.
   if path.exists(outdir):
-    print >> stderr, 'WARNING: outdir {} already exists.'.format(outdir)
     logtee('(id={}) WARNING: outdir {} already exists.'.format(pid, outdir))
     while path.exists(outdir):
       outdir += '+'
@@ -323,19 +342,7 @@ def opt_check(args, copes):
       dilmm = float(dilmm)
     except ValueError:
       raise GroupError('dilate distance must be a number.')
-
-  # Global log.
-  logfile = args['--log']
-  if logfile is not None:
-    logdir = path.dirname(path.abspath(logfile))
-    if not path.isdir(logdir):
-      raise GroupError('directory above log file: {} does not exist.'.format(logdir))
-  else:
-    # Default global log.
-    logfile = 'groupstats_{}.log'.format(now.strftime('%m%d%y'))
-  # Global logfile variable now points to an open file object. *Not a path string.*
-  logfile = open(logfile, 'a')
-  return subj, copes, do_ols, dilmm, logfile
+  return subj, copes, do_ols, dilmm
 
 def ffx_check(ffxdir):
   """
@@ -393,6 +400,7 @@ def make_images(ffxdirs, copes, do_ols, outdir):
   Grab cope, varcope images from fixedfx dirs and concatenate.
   """
   for cope in copes:
+    logtee('(id={}) Concatenating cope and varcope images for cope: {}.\n'.format(pid, cope))
     for imgtype in 'cope', 'varcope':
       merge_arg = ' '.join(['-metric {}/cope{}/{}1.func.gii'.format(fd, cope, imgtype) for fd in ffxdirs])
       ec = metric_merge('{}/{}{}.func.gii {}'.format(outdir, imgtype, cope, merge_arg))
@@ -424,6 +432,7 @@ def glmfit_wrap(copes, outdir, do_ols, subj, hemi):
   con = '{}/con1.mtx'.format(outdir)
   stats_type = {True: 'ols', False: 'wls'}[do_ols]
   for cope in copes:
+    logtee('(id={}) Running mri_glmfit for cope: {}.\n'.format(pid, cope))
     cope_f = '{}/cope{}.func.gii'.format(outdir, cope)
     cope_outdir = '{}/cope{}'.format(outdir, cope)
     # Random-effects stats.
@@ -441,8 +450,9 @@ def glmfit_wrap(copes, outdir, do_ols, subj, hemi):
     move(cope_f, '{}/cope{}.func.gii'.format(cope_outdir, cope))
     if not do_ols:
       move(varcope_f, '{}/varcope{}.func.gii'.format(cope_outdir, cope))
-
+    
     # FDR correction
+    logtee('(id={}) Running FDR correction for cope: {}.\n'.format(pid, cope))
     surface = '{}/{}/surf/{}.midthickness.surf.gii'.format(SD, subj, hemi)
     try:
       fdr_thresh = fdr_corr('--mask={}/mask.mgh --surf={} logp {}/con1/sig.mgh {}/con1/sig_fdr.func.gii'.format(cope_outdir, surface, cope_outdir, cope_outdir))
@@ -452,6 +462,12 @@ def glmfit_wrap(copes, outdir, do_ols, subj, hemi):
     # FDR threshold (-logp) for q=0.05: 2.99535
     fdr_thresh = fdr_thresh.split(': ')[1]
     write_out('{}/con1/fdr05_thresh.txt'.format(cope_outdir), fdr_thresh)
+
+    # Convert GLM mask for convenient use in PALM.
+    surface = '{}/{}/surf/{}.white'.format(SD, subj, hemi)
+    ec = mris_convert('-f {}/mask.mgh {} {}/mask.shape.gii'.format(cope_outdir, surface, cope_outdir))
+    if ec != 0:
+      raise GroupError('mask conversion to .shape.gii failed.')
   return
 
 def cleanup():
@@ -465,9 +481,6 @@ if __name__ == '__main__':
     cleanup()
     exit(0)
   except GroupError as e:
-    print >> stderr, e
     logtee('(id={}) {}'.format(pid, e))
-    if logfile is not None:
-      logfile.write(str(e))
     cleanup()
     exit(1)
