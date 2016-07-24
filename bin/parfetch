@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# TODO: Need to handle multiple scan sessions better. Right now when we
+# parfetch a second scan session. A new raw directory gets created, and we have
+# to copy the contents to the original raw directory manually.
+
 read_sl () {
   # Usage: read_sl <scan-log> <field-key>
   # Read scan log and return value for given key. 
