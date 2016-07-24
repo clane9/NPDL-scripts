@@ -1,37 +1,63 @@
 #!/usr/bin/env python
 
 """
-Usage: groupstats [options] <hemi> <design> <cons> <outdir> <ffx-dir>...
+Usage: groupstats [options] <hemi> <design> <con> <outdir> <ffx-dir>...
 
-Run group analysis on individual fixed effects results. 
+Run random-effects group analysis on individual subject fixed effects results,
+using either OLS or WLS regression. Analysis is carried out using Freesurfer's
+mri_glmfit tool. Univariate analysis will be performed in all verices with non-zero
+values in all subjects. This ensures that vertices missing data are not
+analyzed. (See information on mri_glmfit --prune option for more details.)
+Instructions for permutation correction are provided in the output log.
 
-Example: 
-  groupstats --copes 5,6,7 --dil 5 lh design.mat cons.txt grp_avg.rfx sub_01.lh.ffx sub_02.lh.ffx sub_03.lh.ffx
+Example:
+  groupstats --copes 5,6,7 --dil 5 lh design.mat con.mtx grp_avg.rfx sub_01.lh.ffx sub_02.lh.ffx sub_03.lh.ffx
 
 Arguments:
-  <hemi>       lh or rh.
-  <design>     Design matrix text file.
-  <cons>       Contrasts text file. One per row.
+  <hemi>       Hemisphere of data (lh or rh).
+  <design>     Design matrix text file. Columns should be separated by spaces
+               or tabs. Either a simple text matrix format, or the FSL
+               design.mat format is acceptable. The order of rows should
+               correspond to the order of fixed-effects directories. See the
+               FSL GLM manual (http://fsl.fmrib.ox.ac.uk/fsl/fslwiki/GLM) for
+               tips on creating the design matrix.
+  <con>        Contrast text file. Should consist of a single row of numbers
+               for a t-contrast, or multiple rows for an F-contrast. Either a
+               simple text matrix format, or the FSL design.con format is
+               acceptable. Each row should contain one entry for each column in
+               the design matrix. Note that FSL-style design.con files often
+               have multiple rows, each representing a different t-contrast.
+               These files will be incorrectly interepreted, as representing a
+               single F-contrast! Multiple t-contrasts are not supported, due
+               to a bug in mri_glmfit:
+                 https://www.mail-archive.com/freesurfer%40nmr.mgh.harvard.edu/msg21068.html
   <outdir>     Output directory.
-  <ffx-dir>    Fixed effects directory (repeatable). Order should match
+  <ffx-dir>    Fixed-effects directory (repeatable). Order should match
                design matrix. All directories should have the same contrasts.
 
 Options:
-  --s <subj>         Freesurfer subject to perform analysis on. [default: 32k_fs_LR] 
-  --copes <copes>    Analyze only listed copes. Otherwise, will analyze
-                     all copes for task. Must be comma separated (Eg 1,2,3,7).
-  --ols              Do ordinary least squares analysis. Otherwise, will
+  --s <subj>         Freesurfer subject to perform analysis on [default: 32k_fs_LR].
+  --copes <copes>    List of copes (contrasts) to analyze. Otherwise, will
+                     analyze all copes for task. Must be comma separated
+                     (E.g. --copes 1,2,3,7).
+  --ols              Do ordinary least squares regression. Otherwise, will
                      do weighted least squares.
-  --dil <dist>       Dilate data before performing stats. Distance in mm.
-  --log <logfile>    Specify the log file.
+  --dil <dist>       Distance in mm to dilate data before performing stats.
+  --log <log>        Specify the log file.
 """
 
-# TODO: Should consider moving to using FSL's PALM tool for multiple comparison
-# correction (http://fsl.fmrib.ox.ac.uk/fsl/fslwiki/PALM/UserGuide).
 # TODO: Should add support for F-tests.
-# TODO: Should handle missing data with voxelwise EVs, as in fixedfx.
+# TODO: Should think about handling missing data with voxelwise EVs (--pvr
+# option) as in fixedfx. However the problem is trickier at the group level,
+# since you need at least 2 subjects per group worth of data to be valid. Also,
+# stats would be harder to report, if varying DOF are possible.
+# TODO: We need a way to generate nice peak-tables for group maps.
 
-# put this up here to avoid imports if I'm only trying to get help message
+# NOTE: There is no particular reason why this script is in Python, whereas
+# firstlevel and fixedfx are Bash scripts. That's just how it happened I
+# guess...
+
+# Parse the command-line before other imports, for a faster help message.
 from docopt import docopt
 args = docopt(__doc__)
 
@@ -57,112 +83,240 @@ now = datetime.today()
 pid = getpid()
 scriptname = path.basename(argv[0])
 logfile = None
+SD = environ['SUBJECTS_DIR']
 
 def main(args):
+  # Make logfile global so we can set its global value within the opt_check function.
   global logfile
-  hemi, design, cons, outdir, ffxdirs, copes = arg_check(args)
+
+  # Read and validate options and arguments.
+  hemi, design, con, outdir, ffxdirs, copes = arg_check(args)
   subj, copes, do_ols, dilmm, logfile = opt_check(args, copes)
+
+  # Start logging
+  # There are two logs: a "global" log (referenced by the --log <log> flag),
+  # and a local log that gets saved in the output dir. Having a global log
+  # makes most sense when you're running multiple groupstats jobs at the same
+  # time, and you want all the logging in one place.
   command_line = scriptname + ' ' + ' '.join(argv[1:])
   logtee('groupstats run at {} (id={})\ncommand line: {}\n'.format(now.strftime('%m-%y %H:%M:%S'), pid, command_line))
   logtee('(id={}) Prepping inputs...\n'.format(pid))
   mkdir(outdir)
   write_out('{}/log'.format(outdir), 'command line: {}\n\n'.format(command_line))
-  make_design_cons(design, cons, outdir)
+
+  # Prepare inputs for mri_glmfit.
+  # This is the only important thing the script does. Unlike preproc or
+  # firstlevel (where a bunch of operations are applied to the data),
+  # groupstats is really just a wrapper around mri_glmfit. We could have just
+  # used mri_glmfit directly, but it would have been annoying to organize the
+  # data the way it needs every time.
+
+  # The organization steps include:
+  # - Massaging design and contrast inputs into Freesurfer format (not really
+  #   necessary).
+  # - Concatenating cope & varcope images across subjects, for each lower-level
+  #   contrast.
+  # - Optionally: dilating the concatenated cope & varcope images to fill in
+  #   small holes in subjects' images with nearby data.
+
+  # Currently, contrast files with multiple rows are treated as F-contrasts.
+  # But previously multiple rows in the contrast file were treated as separate
+  # t-contrasts. However, multiple t-contrasts cause problems for permutation
+  # correction, due to a bug in mri_glmfit-sim:
+  #     https://www.mail-archive.com/freesurfer%40nmr.mgh.harvard.edu/msg21068.html
+  # For this reason, I decided to stop supporting them. It would be a big
+  # problem to report incorrect stats because of this bug!
+  make_design_con(design, con, outdir)
   make_images(ffxdirs, copes, do_ols, outdir)
   if dilmm is not None:
     image_dilate(subj, hemi, dilmm, outdir)
+
+  # Run group statistics.
+  # The default method is weighted least-squares (WLS) random-effects
+  # regression. Optionally, you can do ordinary least-squares (OLS) instead.
+  # WLS regression is used to handle unequal variances between subjects. The
+  # effect of using WLS is that noisy subjects carry less weight.
+
+  # The OLS regression equation is:
+  #     y = Xb + e
+  # While the WLS equation is:
+  #     Wy = WXb + e
+  # With the weight matrix W a diagonal matrix: W_{i,i} = 1 / \sigma_i^2.
+
+  # For noisy subjects, the measured data y_i and predicted values in the ith
+  # row of X are shrunk down. This makes the model more tolerant to larger
+  # errors in these subjects than it would have been otherwise. I.e. these
+  # subjects don't get to "push the betas around" as much as less noisy
+  # subjects do. (See: https://onlinecourses.science.psu.edu/stat501/node/352
+  # for more information.)
+
+  # Critically, both OLS and WLS are random-effects analyses. The variance term
+  # that goes into computing the statistics results from the residuals (e),
+  # rather than just some "average" of the lower-level variances (as in
+  # fixed-effects analysis).
   logtee('(id={}) Running group statistics...\n'.format(pid))
   glmfit_wrap(copes, outdir, do_ols, subj, hemi)
   logtee('(id={}) Done!\n'.format(pid))
-  done_s = 'groupstats completed successfully! To run mc correction, enter e.g.:\n'
-  done_s += 'mri_glmfit-sim --glmdir {}/cope{} --sim perm 5000 2 perm_5000_01 --sim-sign abs\n'.format(path.abspath(outdir), copes[0])
-  write_out('{}/log'.format(outdir), done_s) 
+
+  done_s = 'groupstats completed successfully!\n\n'
+
+  # Write some hints on performing permutation correction to the local log.
+  # Permutation correction is not performed within the script since it's
+  # time-consuming and there's no real scripting needed--to run it you just
+  # need to execute one command, taking some of the groupstats outputs as
+  # inputs.
+
+  # One option is to use Freesurfer's mri_glmfit-sim to permutation-correct.
+  # It's easy to run, but has the drawback of only supporting one
+  # test-statistic: cluster size.
+  absoutdir = path.abspath(outdir)
+  done_s += 'To run permutation correction in Freesurfer, run e.g.:\n'
+  done_s += 'mri_glmfit-sim --glmdir {}/cope{} \\\n'.format(absoutdir, copes[0])
+  done_s += '    --sim perm 5000 2 perm_5000_01 --sim-sign pos\n\n'
+  done_s += 'This will perform 5000 iterations, using the cluster-size test-statisic,\n'
+  done_s += 'and a p=.01 uncorrected (-log10(p) = 2) cluster forming threshold.\n'
+  done_s += 'One-sided tests are assumed (--sim-sign pos).\n\n'
+
+  # Another option is to use FSL's PALM tool, which has more options.
+  done_s += 'Or, you can use FSL\'s PALM tool, for more extensive options. E.g.:\n'
+  done_s += 'palm -i {}/cope{}/cope{}.func.gii \\\n'.format(absoutdir, copes[0], copes[0])
+  done_s += '    -m {}/cope{}/mask.mgh \\\n'.format(absoutdir, copes[0])
+  done_s += '    -s {}/{}/surf/{}.midthickness.surf.gii \\\n'.format(SD, subj, hemi)
+  done_s += '    -d {}/design.csv -t {}/con1.csv \\\n'.format(absoutdir, absoutdir)
+  done_s += '    -n 5000 -T -C 2.3 -Cstat mass \\\n'
+  done_s += '    -o {}/cope{}/con1/palm_ -logp\n\n'.format(absoutdir, copes[0])
+  done_s += 'This will perform 5000 iterations, using two test-statistics: TFCE (-T),\n'
+  done_s += 'and cluster mass, with a cluster-forming threshold of z=2.3 (p=.01) (-C 2.3).\n'
+  done_s += 'Again, one-sided tests are assumed. P-value outputs are saved as -log10(p).\n'
+  done_s += 'Note that this usage of palm assumes a t-contrast! An F-contrast\n'
+  done_s += 'will require a more complicated usage.\n'
+
+  write_out('{}/log'.format(outdir), done_s)
   return
 
 def logtee(s):
+  """
+  Save a message to the global log, and also print to the console.
+  """
   logfile.write(s)
   print s
   return
-  
+
 def write_out(f, s):
+  """
+  Convenience method for writing a string to a text file.
+  """
   f = open(f, 'a')
   f.write(s)
   f.close()
   return
 
-def make_cmnd(cmnd_name):
-  def cmnd(args):
-    return subprocess.call('{} {}'.format(cmnd_name, args), shell=True) # would like to capture stderr somehow
+def make_cmnd(cmnd_name, with_output=False):
+  """
+  Turn a shell command into a python function, using subprocess.
+  """
+  # TODO: would like to capture stderr somehow.
+  if with_output:
+    def cmnd(args):
+      return subprocess.check_output('{} {}'.format(cmnd_name, args), shell=True)
+  else:
+    def cmnd(args):
+      return subprocess.call('{} {}'.format(cmnd_name, args), shell=True)
   return cmnd
 
-fslmerge = make_cmnd('fslmerge')
+# Define some pointers to shell commands needed throughout the script.
 mri_glmfit = make_cmnd('mri_glmfit')
-mri_glmfit_sim = make_cmnd('mri_glmfit-sim')
-metric_resample = make_cmnd('wb_command -metric-resample')
 metric_merge = make_cmnd('wb_command -metric-merge')
 metric_dilate = make_cmnd('wb_command -metric-dilate')
+fdr_corr = make_cmnd('fdr_corr', with_output=True)
 
 def arg_check(args):
   """
   Quality check arguments.
   """
+  # Hemisphere.
   hemi = args['<hemi>']
-  if hemi not in {'lh', 'rh'}:
+  if not hemi in {'lh', 'rh'}:
     raise GroupError('hemi must be lh or rh.')
-  
+
+  # Design files.
   design = args['<design>']
-  cons = args['<cons>']
-  if not path.isfile(design) or not path.isfile(cons):
-    raise GroupError('design or contrasts file does not exist.')
+  con = args['<con>']
+  if not path.isfile(design) or not path.isfile(con):
+    raise GroupError('design or contrast file does not exist.')
   try:
     design = read_table(design)
-    cons = read_table(cons)
+    con = read_table(con)
   except:
-    raise GroupError('design or contrasts file has bad format.')
+    raise GroupError('design or contrast file has bad format.')
+  # Check whether contrast file contains more than one row.
+  # This could happen if an FSL-style design.con file is used, representing
+  # multiple t-contrasts. In this case, the contrast will be interpreted
+  # incorrectly, as an F-contrast.
+  if len(con) > 1:
+    print >> stderr, 'WARNING: contrast file contains more than one row. It will be treated as an F-contrast.'.format(outdir)
+    logtee('(id={}) WARNING: contrast file contains more than one row. It will be treated as an F-contrast.'.format(pid, outdir))
 
+  # Output directory.
   outdir = args['<outdir>']
   if not path.isdir(path.abspath(path.dirname(outdir))):
     raise GroupError('directory above {} does not exist.'.format(outdir))
+  # If the ouput directory already exists, don't overwrite. Just add a '+' to
+  # the dir name.
   if path.exists(outdir):
     print >> stderr, 'WARNING: outdir {} already exists.'.format(outdir)
+    logtee('(id={}) WARNING: outdir {} already exists.'.format(pid, outdir))
     while path.exists(outdir):
       outdir += '+'
-  
+
+  # Fixed-effects dirs.
   ffxdirs = args['<ffx-dir>']
+  # Make sure number of input directories matches number of rows in design matrix.
   if len(ffxdirs) != len(design):
     raise GroupError('design does not match fixedfx directories.')
+  # Check that each ffx dir exists, and fetch the copes found in each.
   copes = []
   for ffxdir in ffxdirs:
     if not path.isdir(ffxdir):
       raise GroupError('fixedfx directory {} does not exist.'.format(ffxdir))
+    # Append a tuple of the cope numbers found in ffxdir.
     copes.append(ffx_check(ffxdir))
+  # Make sure each ffx dir has the same set of copes.
   copes = list(set(copes))
   if len(copes) > 1:
     raise GroupError('not all fixedfx directories have same copes.')
+  # Return the list of common cope numbers.
   copes = copes[0]
-  return hemi, design, cons, outdir, ffxdirs, copes
+  return hemi, design, con, outdir, ffxdirs, copes
 
 def opt_check(args, copes):
   """
   Check options.
   """
+
+  # Freesurfer subject.
   subj = args['--s']
-  if not path.isdir('{}/{}'.format(environ['SUBJECTS_DIR'], subj)):
-    raise GroupError('Freesurfer subject {} not in {}.'.format(subj, environ['SUBJECTS_DIR']))
-  
+  if not path.isdir('{}/{}'.format(SD, subj)):
+    raise GroupError('Freesurfer subject {} not in {}.'.format(subj, SD))
+
+  # List of copes to analyze.
   less_copes = args['--copes']
   if less_copes is not None:
+    # Check that --copes flag consists of a list of ints, separated by commas.
     less_copes = less_copes.split(',')
     try:
       less_copes = sorted(map(int, less_copes))
     except ValueError:
       raise GroupError('--copes argument has bad format.')
+    # Check that these copes are a subset of the complete copes list.
     if not set(less_copes) <= set(copes):
       raise GroupError('some of the cope numbers provided are not in the fixedfx dirs.')
-    copes = less_copes 
+    copes = less_copes
 
+  # OLS vs WLS setting.
   do_ols = args['--ols']
-  
+
+  # Dilation setting.
   dilmm = args['--dil']
   if dilmm is not None:
     try:
@@ -170,23 +324,28 @@ def opt_check(args, copes):
     except ValueError:
       raise GroupError('dilate distance must be a number.')
 
+  # Global log.
   logfile = args['--log']
   if logfile is not None:
-    if not path.isdir(path.dirname(path.abspath(logfile))):
-      raise GroupError('directory above log file {} does not exist.'.format(logfile))
+    logdir = path.dirname(path.abspath(logfile))
+    if not path.isdir(logdir):
+      raise GroupError('directory above log file: {} does not exist.'.format(logdir))
   else:
+    # Default global log.
     logfile = 'groupstats_{}.log'.format(now.strftime('%m%d%y'))
+  # Global logfile variable now points to an open file object. *Not a path string.*
   logfile = open(logfile, 'a')
-
   return subj, copes, do_ols, dilmm, logfile
 
 def ffx_check(ffxdir):
   """
   Check that a fixed effects directory has correct structure, return contrast list.
   """
+  # Glob a list of cope directories in the fixed-effects dir.
   copedirs = glob('{}/cope[1-9]'.format(ffxdir)) + glob('{}/cope[1-9][0-9]'.format(ffxdir))
   if len(copedirs) == 0:
     raise GroupError('fixed effects directory {} has bad structure.'.format(ffxdir))
+  # Convert list of cope dirs to list of cope numbers.
   copes = tuple(sorted(map(lambda c: int(path.basename(c).replace('cope', '')), copedirs)))
   return copes
 
@@ -194,29 +353,44 @@ def read_table(table_f):
   """
   general function for reading number tables.
   """
+  # Lines should be separated by one or more returns or newlines.
   nl_pattern = r'[\n\r]+'
-  row_pattern = r'^-?\.?[0-9].*' 
+  # Columns should be separated by one or more spaces, tabs, or commas.
+  # NOTE: Multiple tabs or commas maybe shouldn't be treated as a single
+  # delimiter. Doesn't really matter though--we can trust the user to give us
+  # good files...
   delim_pattern = r'[ \t,]+'
+  # Rows should start with a number.
+  # NOTE: This is kind of sloppy. If we really want to check that the contents
+  # are numbers, we should do a better job. Probably not necessary in any case.
+  # In particular, rows starting with a "+" will fail. This sometimes happens
+  # in FSL-generated design files.
+  row_pattern = r'^-?\.?[0-9].*'
   table_s = open(table_f).read().strip()
   rows = re.split(nl_pattern, table_s)
+  # Keep only the rows matching the row pattern.
   rows = [row.strip() for row in rows if re.match(row_pattern, row.strip()) is not None]
   data = [re.split(delim_pattern, row) for row in rows]
+  # Make sure contents form a rectangular matrix.
   if len(set([len(row) for row in data])) != 1:
     raise
   return data
 
-def make_design_cons(design, cons, outdir):
+def make_design_con(design, con, outdir):
   """
   create design matrix and contrast text files.
   """
-  write_out('{}/design.mat'.format(outdir), '\n'.join(['\t'.join(row) for row in design]))
-  for i in range(len(cons)):
-    write_out('{}/con{}.mtx'.format(outdir, i+1), '\t'.join(cons[i]) + '\n')
+  # Save plain text design matrices and contrast files, with tab delimters for
+  # mri_glmfit, and comma deliters for PALM.
+  write_out('{}/design.mat'.format(outdir), '\n'.join(['\t'.join(row) for row in design]) + '\n')
+  write_out('{}/design.csv'.format(outdir), '\n'.join([','.join(row) for row in design]) + '\n')
+  write_out('{}/con1.mtx'.format(outdir), '\n'.join(['\t'.join(row) for row in con]) + '\n')
+  write_out('{}/con1.csv'.format(outdir), '\n'.join([','.join(row) for row in con]) + '\n')
   return
 
 def make_images(ffxdirs, copes, do_ols, outdir):
   """
-  Grab cope, varcope images from fixedfx dirs, resample to fsaverage and concatenate.
+  Grab cope, varcope images from fixedfx dirs and concatenate.
   """
   for cope in copes:
     for imgtype in 'cope', 'varcope':
@@ -224,14 +398,18 @@ def make_images(ffxdirs, copes, do_ols, outdir):
       ec = metric_merge('{}/{}{}.func.gii {}'.format(outdir, imgtype, cope, merge_arg))
       if ec != 0:
         raise GroupError('metric-merge failed')
-      if do_ols: break # don't do varcope iteration
+      # Don't do varcope iteration if running OLS.
+      if do_ols:
+        break
   return
 
 def image_dilate(subj, hemi, dilmm, outdir):
   """
   Dilate cope and varcope images.
   """
-  surface = '{}/{}/surf/{}.midthickness.surf.gii'.format(environ['SUBJECTS_DIR'], subj, hemi)
+  # Vertices with value 0 will be filled with average of nearby vertices, up to
+  # dilmm away, for each subject separately.
+  surface = '{}/{}/surf/{}.midthickness.surf.gii'.format(SD, subj, hemi)
   for image in glob('{}/*cope*.func.gii'.format(outdir)):
     ec = metric_dilate('{} {} {} {}'.format(image, surface, dilmm, image))
     if ec != 0:
@@ -240,16 +418,20 @@ def image_dilate(subj, hemi, dilmm, outdir):
 
 def glmfit_wrap(copes, outdir, do_ols, subj, hemi):
   """
-  Encapsulate mri_glmfit procedure.
+  Encapsulate mri_glmfit procedure. Plus do FDR correction.
   """
   design = '{}/design.mat'.format(outdir)
-  cons = glob('{}/con*.mtx'.format(outdir))
-  cons_arg = ' '.join(['--C ' + con for con in cons])
+  con = '{}/con1.mtx'.format(outdir)
   stats_type = {True: 'ols', False: 'wls'}[do_ols]
   for cope in copes:
     cope_f = '{}/cope{}.func.gii'.format(outdir, cope)
     cope_outdir = '{}/cope{}'.format(outdir, cope)
-    glmfit_args = '--y {} --X {} {} --glmdir {} --surf {} {} --cortex'.format(cope_f, design, cons_arg, cope_outdir, subj, hemi)
+    # Random-effects stats.
+    # --prune option removes vertices from analysis that have value 0 in one or
+    # more subjects. This prevents analyzing vertices without full data.
+    # --cortex restricts analysis to cortex mask. This is important if we
+    # previously dilated the data.
+    glmfit_args = '--y {} --X {} --C {} --glmdir {} --surf {} {} --cortex --prune'.format(cope_f, design, con, cope_outdir, subj, hemi)
     if not do_ols:
       varcope_f = '{}/varcope{}.func.gii'.format(outdir, cope)
       glmfit_args += ' --wls {}'.format(varcope_f)
@@ -259,6 +441,17 @@ def glmfit_wrap(copes, outdir, do_ols, subj, hemi):
     move(cope_f, '{}/cope{}.func.gii'.format(cope_outdir, cope))
     if not do_ols:
       move(varcope_f, '{}/varcope{}.func.gii'.format(cope_outdir, cope))
+
+    # FDR correction
+    surface = '{}/{}/surf/{}.midthickness.surf.gii'.format(SD, subj, hemi)
+    try:
+      fdr_thresh = fdr_corr('--mask={}/mask.mgh --surf={} logp {}/con1/sig.mgh {}/con1/sig_fdr.func.gii'.format(cope_outdir, surface, cope_outdir, cope_outdir))
+    except CalledProcessError:
+      raise GroupError('FDR correction failed.')
+    # Example fdr_corr output:
+    # FDR threshold (-logp) for q=0.05: 2.99535
+    fdr_thresh = fdr_thresh.split(': ')[1]
+    write_out('{}/con1/fdr05_thresh.txt'.format(cope_outdir), fdr_thresh)
   return
 
 def cleanup():
@@ -273,6 +466,7 @@ if __name__ == '__main__':
     exit(0)
   except GroupError as e:
     print >> stderr, e
+    logtee('(id={}) {}'.format(pid, e))
     if logfile is not None:
       logfile.write(str(e))
     cleanup()
