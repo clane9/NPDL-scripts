@@ -492,3 +492,47 @@ def block_diag(*arrs):
     block = np.hstack([block, arr])
 
   return block
+
+def convert_coords(coord, inspace='MNI305', outspace='MNI152'):
+  """Convert MRI coordinates between template spaces.
+
+  Args:
+    coord: (X, Y, Z) coordinate as a Numpy array or list.
+    inspace: Input coordinate space (one of 'MNI305', 'MNI152', 'Tal').
+    outspace: Output coordinate space.
+  """
+  # Define base transformation matrices.
+  mats = {
+      # Refs:
+      # - https://mail.nmr.mgh.harvard.edu/pipermail//freesurfer/2013-November/034417.html
+      # - https://surfer.nmr.mgh.harvard.edu/fswiki/CoordinateSystems
+      ('MNI305', 'MNI152'): np.array([[0.9975, -0.0073, 0.0176, -0.0429],
+                                      [0.0146, 1.0009, -0.0024, 1.5496],
+                                      [-0.0130, -0.0093, 0.9971, 1.1840],
+                                      [0.0000, 0.0000,  0.0000,  1.0000]]),
+      
+      # Refs:
+      # - http://www.brainmap.org/icbm2tal/
+      ('MNI152', 'Tal'): np.array([[0.9464, 0.0034, -0.0026, -1.0680],
+                                   [-0.0083, 0.9479, -0.0580, -1.0239],
+                                   [0.0053, 0.0617,  0.9010, 3.1883],
+                                   [0.0000, 0.0000,  0.0000,  1.0000]])
+      }
+
+  # Invert tranformations.
+  mats[('MNI152', 'MNI305')] = np.linalg.inv(mats[('MNI305', 'MNI152')])
+  mats[('Tal', 'MNI152')] = np.linalg.inv(mats[('MNI152', 'Tal')])
+
+  # Concatenate transformations.
+  mats[('MNI305', 'Tal')] = mats[('MNI152', 'Tal')].dot(mats[('MNI305', 'MNI152')])
+  mats[('Tal', 'MNI305')] = mats[('MNI152', 'MNI305')].dot(mats[('Tal', 'MNI152')])
+
+  # Convert coordinate to numpy column vector, and add a 1.
+  coord = np.vstack([np.array(coord).reshape(3, 1), [[1.]]])
+  
+  # Transform coordinate.
+  new_coord = mats[(inspace, outspace)].dot(coord)
+
+  # Re-format coordinate.
+  new_coord = new_coord.reshape(-1)[:3]
+  return new_coord
