@@ -55,6 +55,9 @@ Options:
   --lit-coord <coord>  Measure and report distance from ROI peak to literature
                        or group average coordinate. Coordinate can be X,Y,Z or
                        vertex index (E.g. --lit-coord=20.,19.,-5.).
+  --coord-std <std>    Coordinate standard space, used in interpreting
+                       literature coordinate, and for reporting ROI coordinates.
+                       Options are: MNI152, MNI305, or Tal [default: MNI305].
   --peak-thr <perc>    Threshold for finding distinct peaks of activation in
                        watershed mode. Each connected cluster above this
                        threshold will give rise to a distinct ROI. Threshold
@@ -89,7 +92,7 @@ import sys
 import tempfile as tf
 import threading as th
 
-from npdl_utils import Logger, NPDLError, Surface, img_read, img_save, read_table, init_table
+from npdl_utils import Logger, NPDLError, Surface, img_read, img_save, read_table, init_table, convert_coords
 
 logger = Logger(global_log=None, local_log=None, pid=os.getpid())
 
@@ -120,6 +123,9 @@ def main():
   # Coordinate options
   circ_coord, circ_coord_type = coord_check(ARGS['-c'], '-c')
   lit_coord, lit_coord_type = coord_check(ARGS['--lit-coord'], '--lit-coord')
+  std_space = ARGS['--coord-std']
+  if std_space not in {'MNI305', 'MNI152', 'Tal'}:
+    raise NPDLError('Coordinate standard space must be one of: MNI305, MNI152, or Tal.') 
 
   # Checking paths
   for opt_name in ['<info>', '<roi>']:
@@ -197,8 +203,12 @@ def main():
 
   # Project input coordinates to surface (i.e. find closest vertex).
   if circ_coord_type == 'coord':
+    # First convert to MNI305
+    circ_coord = convert_coords(circ_coord, std_space, 'MNI305')
     circ_coord = surf.project_coord(circ_coord)
   if lit_coord_type == 'coord':
+    # First convert to MNI305
+    lit_coord = convert_coords(lit_coord, std_space, 'MNI305')
     lit_coord = surf.project_coord(lit_coord)
 
   # ----------------------------------------------------------------------------
@@ -282,7 +292,7 @@ def main():
   # Compute descriptive stats
   rois = np.array(rois)
   num_rois = rois.shape[0]
-  roi_stats = [descriptive_stats(rois[i, :], stat, surf, lit_coord, circ_coord) 
+  roi_stats = [descriptive_stats(rois[i, :], stat, surf, std_space, lit_coord, circ_coord) 
                for i in range(num_rois)]
   roi_stats = np.array(roi_stats, dtype=object)
 
@@ -600,7 +610,7 @@ def watershed(seeds, stat, mask, surf, fill_rate=.05, fill_stop=None):
     clusters.append(cluster)
   return clusters
 
-def descriptive_stats(roi, stat, surf, lit_coord=None, circ_coord=None):
+def descriptive_stats(roi, stat, surf, std_space, lit_coord=None, circ_coord=None):
   """Compute descriptive stats for ROI."""
   roi_inds = np.arange(roi.size)[roi==1]
 
@@ -617,7 +627,8 @@ def descriptive_stats(roi, stat, surf, lit_coord=None, circ_coord=None):
     peak_vert = circ_coord
   else:
     peak_vert = roi_inds[np.argmax(stat[roi_inds])]
-  peak_x, peak_y, peak_z = surf.coords[peak_vert, :]
+  peak_coord = surf.coords[peak_vert, :]
+  peak_x, peak_y, peak_z = convert_coords(peak_coord, 'MNI305', std_space)
 
   # Number of connected components
   num_components = count_components(roi, surf)
