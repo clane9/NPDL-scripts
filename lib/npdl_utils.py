@@ -527,6 +527,10 @@ def convert_coords(coord, inspace='MNI305', outspace='MNI152'):
   mats[('MNI305', 'Tal')] = mats[('MNI152', 'Tal')].dot(mats[('MNI305', 'MNI152')])
   mats[('Tal', 'MNI305')] = mats[('MNI152', 'MNI305')].dot(mats[('Tal', 'MNI152')])
 
+  # Identity transformations.
+  for space in ['MNI305', 'MNI152', 'Tal']:
+    mats[(space, space)] = np.eye(4)
+
   # Convert coordinate to numpy column vector, and add a 1.
   coord = np.vstack([np.array(coord).reshape(3, 1), [[1.]]])
   
