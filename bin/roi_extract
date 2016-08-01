@@ -346,10 +346,14 @@ def main():
   tr_durs = dict()
   for cond in conds:
     tr_dur = np.unique(events.get_tr_durs(cond=cond))
-    if tr_dur.size > 1 and not mode.isdisjoint({'fir', 'classic'}):
-      raise NPDLError(('Not all events of condition: {} have the same duration, ' +
-                       'even after rounding to the nearest TR.').format(cond))
-    tr_durs[cond] = int(np.percentile(tr_dur, 50)) + lag
+    if tr_dur.size > 1:
+      logger.warning(('Not all events of condition: {} have the same duration, ' +
+                      'even after rounding up to the nearest TR.').format(cond))
+      # Use average relative offset to determine TR duration.
+      tr_dur = int(np.ceil(np.mean(events.get_rel_offsets(cond=cond)) / tr))
+    else:
+      tr_dur = tr_dur[0]
+    tr_durs[cond] = tr_dur + lag
 
   # ----------------------------------------------------------------------------
   # Peak preparation
