@@ -33,7 +33,7 @@ if [[ $# == 0 || $1 == -h || $1 == --help ]]; then
   echo
   echo "Options:"
   echo "  --mask=<mask>    Mask containing voxels to perform correction over."
-  echo "                   By default will select voxels with p < 0.9999."
+  echo "                   By default will select voxels with non-zero values."
   echo "  --surf=<surf>    Surface used to convert between Nifti and Gifti formats"
   echo "                   [Default: 32k_fs_LR/lh.hcp_very_inflated.surf.gii]."
   echo "  --q=<q>          FDR threshold [Default: 0.05]."
