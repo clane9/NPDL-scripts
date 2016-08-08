@@ -81,6 +81,8 @@ PF_LAB_DIR=
 # Assign Fix/Aroma variables or leave empty if not installed.
 FIX_DIR=
 FIX_RDATA=
+# Optionally set the R_LIBS variable here, so FIX can find its dependencies.
+# R_LIBS=
 AROMA_DIR=
 PRPRC_TEMP=$NPDL_SCRIPT_DIR/etc/preproc_template_design.fsf
 
