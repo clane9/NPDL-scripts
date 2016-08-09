@@ -8,6 +8,7 @@ neat.
 
 ### Changed
 - Changed takesnap inf view angle to fix shadow from @judyseinkim.
+- Changed scripts to record version number from @clane9.
 
 ## [1.0] - 2016-08-09
 
