@@ -6,6 +6,8 @@ neat.
 
 ## [Unreleased]
 
+- Changed takesnap inf view angle to fix shadow from @judyseinkim.
+
 ## [1.0] - 2016-08-09
 
-- First tracked release.
+- First tracked release from @clane9.
