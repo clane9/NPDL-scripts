@@ -414,7 +414,7 @@ takesnap () {
   local surff=$SUBJECTS_DIR/$subj/surf/$hemi.$surf
   local make_lat_ops=( "-cam Azimuth 0" "-cam Azimuth 180" )
   
-  local cam_ops=( ",Azimuth 180" "Azimuth 180," "Elevation -90,Elevation -90" "Elevation 90,Elevation 90" "Azimuth 90,Azimuth 90" "Azimuth -90,Azimuth -90" )
+  local cam_ops=( ",Azimuth 180" "Azimuth 180," "Elevation -90,Azimuth 180 Elevation -90" "Elevation 90,Elevation 90" "Azimuth 90,Azimuth 90" "Azimuth -90,Azimuth -90" )
   
   local cam_op
   case $view in
