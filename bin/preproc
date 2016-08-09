@@ -541,6 +541,9 @@ if (( $ststage <= 1 )); then
 
   echo "$scriptname $args" >> $featdir/command.txt
 
+  # Also record script version being used.
+  echo "NPDL-Scripts version: $NPDL_VERSION" >> $featdir/command.txt
+
   # correcting global signal and making a figure
   ## Why do we have to do this again? If scaling also happens in feat?
   echo "(id=$id) Grand mean intensity scaling..." | tee -a $log

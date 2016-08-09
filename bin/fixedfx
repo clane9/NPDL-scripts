@@ -216,6 +216,7 @@ echo "(id=$id) Prepping." | tee -a $log
 mkdir $outdir
 # TODO: Name the "command" output file consistently across scripts.
 echo "$name $args" >> $outdir/command.txt
+echo "NPDL-Scripts version: $NPDL_VERSION" >> $outdir/command.txt
 tmpdir=$outdir/tmp
 mkdir $tmpdir
 

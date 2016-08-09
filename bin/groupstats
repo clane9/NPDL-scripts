@@ -115,7 +115,8 @@ def main(args):
   
   # Make the output directory, and start the local log.
   mkdir(outdir)
-  write_out('{}/log'.format(outdir), 'command line: {}\n\n'.format(command_line))
+  write_out('{}/log'.format(outdir), 
+            'command line: {}\nNPDL-Scripts version: {}\n\n'.format(command_line, environ['NPDL_VERSION']))
 
   # Prepare inputs for mri_glmfit.
   # This is the only important thing the script does. Unlike preproc or
