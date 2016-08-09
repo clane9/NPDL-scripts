@@ -204,6 +204,9 @@ def main():
   logger.log(('roi_extract job started at {}.\n' +
       'Command line:\n    roi_extract {}').format(start_time_s, ' '.join(sys.argv[1:])))
 
+  # Also record script version being used.
+  logger.log('NPDL-Scripts version: {}'.format(os.environ['NPDL_VERSION']))
+
   # ----------------------------------------------------------------------------
   # Preprocess functional data
   # ----------------------------------------------------------------------------

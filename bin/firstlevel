@@ -385,6 +385,9 @@ fi
 # Save a copy of what firstlevel command was run in the out dir.
 echo "$scriptname $args" >> $outdir/command.txt
 
+# Also record script version being used.
+echo "NPDL-Scripts version: $NPDL_VERSION" >> $outdir/command.txt
+
 # Create a data mask and an inverse data mask for the functional data.
 # Stats will only be performed within the data mask. The mask is defined as all
 # voxels with non-zero variance. It assumes that non-data voxels have already

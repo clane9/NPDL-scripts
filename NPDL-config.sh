@@ -70,6 +70,7 @@ PATH=$PATH:$MRICRON_DIR
 
 # General settings
 NPDL_SCRIPT_DIR=$(cd $(dirname ${BASH_SOURCE[0]}) && pwd)
+NPDL_VERSION=$(cat $NPDL_SCRIPT_DIR/VERSION)
 PATH=$PATH:$NPDL_SCRIPT_DIR/bin
 source $NPDL_SCRIPT_DIR/lib/npdl_funcs.sh
 
