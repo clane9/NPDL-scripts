@@ -12,9 +12,9 @@ set -a
 # Required dependencies, and suggested versions:
 # - FSL (5.0.9)
 # - Freesurfer (5.3.0)
-# - HCP Workbench (1.1.1)
+# - HCP Workbench (1.2.0)
 # - Mricron (2014-08-04)
-# - Python (2.7) [docopt, matplotlib, nibabel, numpy, gdist]
+# - Python (2.7) [docopt, matplotlib, nibabel, numpy, scipy, gdist]
 # - Imagemagick
 
 # Optional:
@@ -48,13 +48,19 @@ PATH=$PATH:$WB_DIR/bin_rh_linux64
 MRICRON_DIR=
 PATH=$PATH:$MRICRON_DIR
 
+# You can set up Python here if you want. If you choose not to, the default
+# python in your path will be used.
+# PYTHON_DIR=
+# PATH=$PYTHON_DIR/bin:$PATH
+
 # You can add MATLAB to path here, But you don't have to since it isn't
-# strictly a dependency (except for PALM).
-# PATH=$PATH:/usr/share/MATLAB/R2014a/bin
+# strictly a dependency (except for PALM and FSL-Fix).
+# MATLAB_DIR=
+# PATH=$MATLAB_DIR/bin:$PATH
 
 # PALM setup (optional).
 # Note that in the script ``palm``, there is a reference to the MATLAB path.
-# If MATLAB moves somewhere, or gets updated, this script will need to
+# If MATLAB moves somewhere, or gets updated, this script will need to be
 # modified.
 # PALM_DIR=
 # PATH=$PATH:$PALM_DIR
@@ -97,6 +103,14 @@ PYTHONPATH=$PYTHONPATH:$NPDL_SCRIPT_DIR/lib
 if [[ ! -d $FSLDIR || ! -d $FREESURFER_HOME || ! -d $WB_DIR || ! -d $MRICRON_DIR ]]; then
   echo "WARNING: Dependency paths not configured." >&2
 fi
+
+# Check Python dependencies.
+python - <<END
+try:
+  import docopt, matplotlib, nibabel, numpy, scipy, gdist
+except ImportError:
+  print 'WARNING: One or more Python dependencies not installed.'
+END
 
 if [[ -z $PF_SERVER_ADDR || -z $PF_PORT || -z $PF_LAB_DIR ]]; then
   echo "WARNING: parfetch environment variables not configured." >&2
