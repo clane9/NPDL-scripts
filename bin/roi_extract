@@ -632,7 +632,10 @@ def read_run_cfds(run_cfds, run_len):
 
     # Determine type of confound
     # Normalize continuous covariates (in particular, center)
+    # Also, remove any redundant spike covariates
     spike_mask = np.ones(run_cfd.shape[1], dtype=int)
+    keep_mask = np.ones(run_cfd.shape[1], dtype=int)
+    spike_inds = [];
     for i in range(run_cfd.shape[1]):
       if np.sum(run_cfd[:, i] == np.round(run_cfd[:, i])) < run_len:
         run_cfd[:, i] = normalize(run_cfd[:, i])
@@ -640,6 +643,14 @@ def read_run_cfds(run_cfds, run_len):
       elif np.sum(run_cfd[:, i]) != 1.:
         raise NPDLError(('Only continuous covariates and spike regressors' +
                         'accepted as confounds.'))
+      else:
+        # Check if spike covariate is redundant.
+        spike_ind = np.argmax(run_cfd[:, i])
+        if spike_ind in spike_inds:
+          keep_mask[i] = 0
+        else:
+          spike_inds.append(spike_ind)
+    run_cfd = run_cfd(:, keep_mask==1)
   return run_cfd, spike_mask
 
 class Events(object):

@@ -413,7 +413,7 @@ def prep_fig(leadbuff, backbuff, bottombuff, topbuff, figw, figh):
 
 def fit_glm(TS, DM, cfd_mat=None, intercept=True, outdir=None,
             out_prefix=None, logger=None):
-  """Calculate GLM beta weights. Return baseline and PSC betas.
+  """Calculate GLM beta weights using SVD. Return baseline and PSC betas.
   """
   # prepend intercept
   if intercept:
@@ -426,7 +426,7 @@ def fit_glm(TS, DM, cfd_mat=None, intercept=True, outdir=None,
     np.savetxt('{}/{}_design.txt'.format(outdir, out_prefix), DM, delimiter=' ')
   # calculate singular values
   try:
-    S = np.linalg.svd(DM, compute_uv=False)
+    U, S, VT = np.linalg.svd(DM, full_matrices=False, compute_uv=True)
   except LinAlgError:
     raise NPDLError('Bad design matrix: SVD did not converge.')
   S_str = ' '.join(['{0:.0f}'.format(s) for s in S])
@@ -434,17 +434,17 @@ def fit_glm(TS, DM, cfd_mat=None, intercept=True, outdir=None,
     logger.log('Singular values for {} design mat: {}.'.format(out_prefix, S_str))
   # determine if rank deficient as in matrix_rank function
   eps = np.finfo('f8').eps
-  thresh = S.max() * np.max(DM.shape) * eps
+  thresh = S[0] * np.max(DM.shape) * eps
   rank = np.sum(S > thresh)
   if logger is not None and out_prefix is not None:
     logger.log('Design matrix width for {}: {}; rank: {}.'.format(out_prefix, DM.shape[1], rank))
   if rank < S.size:
     raise NPDLError('Design matrix is rank deficient.')
-  # calculate betas
-  # y = X*beta
-  # beta = (X'X)^-1 * X' * y
+  # calculate betas using numerically stable SVD method.
+  # See: https://en.wikipedia.org/wiki/Linear_least_squares_(mathematics)#Orthogonal_decomposition_methods
   TS = TS.reshape((-1, 1))
-  beta = np.dot(np.linalg.inv(np.dot(DM.T, DM)), np.dot(DM.T, TS))
+  Sinv = (S ** -1).reshape(-1, 1)
+  beta = np.dot(VT.T, Sinv * np.dot(U.T, TS))
   if outdir is not None and out_prefix is not None:
     np.savetxt('{}/{}_beta.txt'.format(outdir, out_prefix), beta)
   beta = beta.reshape(-1)
