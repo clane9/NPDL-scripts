@@ -650,7 +650,7 @@ def read_run_cfds(run_cfds, run_len):
           keep_mask[i] = 0
         else:
           spike_inds.append(spike_ind)
-    run_cfd = run_cfd(:, keep_mask==1)
+    run_cfd = run_cfd[:, keep_mask==1]
   return run_cfd, spike_mask
 
 class Events(object):
